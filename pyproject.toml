@@ -1,0 +1,23 @@
+[project]
+name = "xg-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "klip", email = "user@example.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.4.0",
+    "langchain-openrouter>=0.2.8",
+    "langgraph>=1.2.11",
+    "pexpect>=4.9.0",
+    "rich>=15.0.0",
+]
+
+[project.scripts]
+xg = "xg_project:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
