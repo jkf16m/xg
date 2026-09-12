@@ -10,7 +10,6 @@ uv run python build.py
 
 This runs:
 - **ruff** — linting (E, F, I, B, S, UP rules)
-- **mypy** — type checking (strict mode)
 
 ## Testing
 

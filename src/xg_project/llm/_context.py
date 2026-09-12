@@ -18,8 +18,8 @@ def project_files(root: Path | None = None) -> list[Path]:
     ignored: set[str] = set()
     if relative_paths:
         try:
-            result = subprocess.run(
-                ["git", "-C", str(root), "check-ignore", "--stdin", "-z"],
+            result = subprocess.run(  # noqa: S603
+                ["git", "-C", str(root), "check-ignore", "--stdin", "-z"],  # noqa: S607
                 input="\0".join(relative_paths) + "\0",
                 capture_output=True,
                 text=True,

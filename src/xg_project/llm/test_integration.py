@@ -3,6 +3,7 @@
 import tempfile
 
 import pytest
+from langchain_core.messages import BaseMessage
 
 from xg_project.llm import (
     add_message,
@@ -27,8 +28,8 @@ def test_initial_context():
 @pytest.mark.integration
 def test_stream_turn():
     """Verify stream_turn streams characters and returns an AIMessage."""
-    messages = []
-    characters = []
+    messages: list[BaseMessage] = []
+    characters: list[str] = []
 
     def on_text(ch):
         characters.append(ch)
@@ -48,7 +49,7 @@ def test_tool_execution():
         f.write("hello from test")
         path = f.name
 
-    tc = {
+    tc: dict[str, object] = {
         "name": "read_file",
         "args": {"path": path},
         "id": "test-read-1",
@@ -57,7 +58,7 @@ def test_tool_execution():
     tm = execute_tool(tc)
     assert tm.content == "hello from test", f"unexpected content: {tm.content!r}"
 
-    messages = [tm]
+    messages: list[BaseMessage] = [tm]
     messages = tool_result(messages, tm)
     assert len(messages) == 2, f"expected 2 messages, got {len(messages)}"
 
@@ -65,8 +66,8 @@ def test_tool_execution():
 @pytest.mark.integration
 def test_full_loop():
     """End-to-end: user message -> stream -> tool call -> tool result -> summary."""
-    messages = initial_file_messages()
-    characters = []
+    messages: list[BaseMessage] = initial_file_messages()
+    characters: list[str] = []
     messages = add_message(messages, TASK)
 
     response, messages = stream_turn(messages, on_text=lambda ch: characters.append(ch))
@@ -74,7 +75,7 @@ def test_full_loop():
 
     if response.tool_calls:
         for tc in response.tool_calls:
-            tm = execute_tool(tc)
+            tm = execute_tool({"name": tc["name"], "args": tc["args"], "id": tc["id"]})
             messages = tool_result(messages, tm)
         response, messages = stream_turn(messages, on_text=lambda ch: characters.append(ch))
 

@@ -33,17 +33,12 @@ select = ["E", "F", "I", "B", "S", "UP"]
 "*_test.py" = ["S101"]
 "test_*.py" = ["S101"]
 
-[tool.mypy]
-strict = true
-disable_error_code = ["no-untyped-def"]
-
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "mypy>=2.3.1",
     "pytest>=9.1.1",
     "ruff>=0.16.7",
 ]

@@ -5,7 +5,6 @@ from pathlib import Path
 from rich.console import Console
 
 from xg_project.llm import (
-    TOOLS,
     add_message,
     execute_tool,
     initial_file_messages,
@@ -33,7 +32,7 @@ def main() -> None:
             continue
 
         # Empty prompt = one LLM call.
-        response, messages = run_turn(messages, TOOLS)
+        response, messages = run_turn(messages)
 
         if response.content:
             console.print(response.content)
@@ -42,7 +41,9 @@ def main() -> None:
         if response.tool_calls:
             for tc in response.tool_calls:
                 console.print(f"  [dim]tool_call: {tc['name']}({tc['args']})[/dim]")
-            console.print("[yellow]Type 'y' to execute, or type a new message to continue.[/yellow]")
+            console.print(
+                "[yellow]Type 'y' to execute, or type a new message to continue.[/yellow]"
+            )
 
             try:
                 decision = input("> ")
@@ -52,7 +53,7 @@ def main() -> None:
 
             if decision.strip().lower() == "y":
                 for tc in response.tool_calls:
-                    tm = execute_tool(tc)
+                    tm = execute_tool({"name": tc["name"], "args": tc["args"], "id": tc["id"]})
                     console.print(f"  [dim]{tm.name}({tc['args']})[/dim]")
                     messages = tool_result(messages, tm)
 

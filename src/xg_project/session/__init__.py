@@ -68,7 +68,8 @@ def messages(path: Path) -> Iterator[BaseMessage]:
 
     Reads lazily — does not load the full file into memory.
     """
-    ...
+    if False:
+        yield
 
 
 def stream(path: Path) -> Iterator[bytes]:
@@ -76,4 +77,5 @@ def stream(path: Path) -> Iterator[bytes]:
 
     Use this to stream the session into an HTTP body or buffer.
     """
-    ...
+    if False:
+        yield

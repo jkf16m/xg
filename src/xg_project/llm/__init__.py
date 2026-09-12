@@ -3,34 +3,39 @@
 Public API
 ----------
 Context:
-    initial_file_messages(root) -> list
+    initial_file_messages(root) -> list[BaseMessage]
 
 Conversation:
-    add_message(msgs, text) -> list
+    add_message(msgs, text) -> list[BaseMessage]
     stream_turn(msgs, on_text) -> (response, msgs)
     run_turn(msgs) -> (response, msgs)
 
 Tools:
     execute_tool(tc) -> ToolMessage
-    tool_result(msgs, tm) -> list
+    tool_result(msgs, tm) -> list[BaseMessage]
     TOOLS -> list
 """
 
-import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Tuple
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from xg_project.llm._api import SYSTEM, get_llm
 from xg_project.llm._context import project_files
 from xg_project.llm._tools import TOOLS
 
 
-def initial_file_messages(root: Path | None = None) -> list:
+def initial_file_messages(root: Path | None = None) -> list[BaseMessage]:
     """Materialize the launch snapshot as read-tool-call/tool-result messages."""
     root = (root or Path.cwd()).resolve()
-    result = []
+    result: list[BaseMessage] = []
     for number, path in enumerate(project_files(root), 1):
         try:
             content = path.read_text()
@@ -46,15 +51,18 @@ def initial_file_messages(root: Path | None = None) -> list:
     return result
 
 
-def add_message(messages: list, text: str) -> list:
+def add_message(messages: list[BaseMessage], text: str) -> list[BaseMessage]:
     """Append a HumanMessage. No LLM call is made."""
     return messages + [HumanMessage(content=text)]
 
 
-def stream_turn(messages: list, on_text=None) -> Tuple[AIMessage, list]:
+def stream_turn(
+    messages: list[BaseMessage],
+    on_text: Callable[[str], None] | None = None,
+) -> tuple[AIMessage, list[BaseMessage]]:
     """Stream exactly one LLM turn, calling on_text(char) for each character."""
     llm = get_llm().bind_tools(TOOLS)
-    response = None
+    response: AIMessage | None = None
     for chunk in llm.stream([SystemMessage(content=SYSTEM), *messages]):
         content = chunk.content
         if isinstance(content, str):
@@ -71,18 +79,18 @@ def stream_turn(messages: list, on_text=None) -> Tuple[AIMessage, list]:
     return response, messages + [response]
 
 
-def run_turn(messages: list) -> Tuple[AIMessage, list]:
+def run_turn(messages: list[BaseMessage]) -> tuple[AIMessage, list[BaseMessage]]:
     """Make one non-streaming LLM call."""
     llm = get_llm().bind_tools(TOOLS)
     response = llm.invoke([SystemMessage(content=SYSTEM), *messages])
     return response, messages + [response]
 
 
-def execute_tool(tool_call: dict) -> ToolMessage:
+def execute_tool(tool_call: dict[str, object]) -> ToolMessage:
     """Execute a single tool call and return the result message."""
-    name = tool_call["name"]
+    name = str(tool_call["name"])
     args = tool_call["args"]
-    tool_id = tool_call["id"]
+    tool_id = str(tool_call["id"])
     tool_fn = {t.name: t for t in TOOLS}[name]
     try:
         result = tool_fn.invoke(args)
@@ -91,6 +99,6 @@ def execute_tool(tool_call: dict) -> ToolMessage:
     return ToolMessage(content=str(result), tool_call_id=tool_id, name=name)
 
 
-def tool_result(messages: list, tool_message: ToolMessage) -> list:
+def tool_result(messages: list[BaseMessage], tool_message: ToolMessage) -> list[BaseMessage]:
     """Append a ToolMessage to the conversation."""
     return messages + [tool_message]

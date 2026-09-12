@@ -7,10 +7,10 @@ import termios
 import tty
 from pathlib import Path
 
+from langchain_core.messages import BaseMessage, messages_from_dict, messages_to_dict
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
-from langchain_core.messages import messages_from_dict, messages_to_dict
 
 from xg_project.llm import (
     add_message,
@@ -94,12 +94,12 @@ def _conversation_path() -> Path:
     return Path.cwd() / ".xg" / "conversation.json"
 
 
-def _load_messages() -> list:
+def _load_messages() -> list[BaseMessage]:
     with _conversation_path().open() as stream:
         return messages_from_dict(json.load(stream))
 
 
-def _save_messages(messages: list) -> None:
+def _save_messages(messages: list[BaseMessage]) -> None:
     path = _conversation_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as stream:
@@ -109,7 +109,10 @@ def _save_messages(messages: list) -> None:
 def main() -> None:
     console = Console()
     console.print("[bold green]xg[/bold green] ready")
-    console.print("Single-turn mode: type a message to store it; press Enter on an empty prompt to send.\n")
+    console.print(
+        "Single-turn mode: type a message to store it;"
+        " press Enter on an empty prompt to send.\n"
+    )
 
     resume = os.environ.get("XG_RESUME") == "1"
     conversation_path = _conversation_path()
@@ -136,11 +139,13 @@ def main() -> None:
             # One LLM turn. Live re-renders the complete Markdown document as
             # each character arrives, so headings, lists, and code fences are
             # rendered dynamically rather than printed as plain text.
-            rendered = []
+            rendered: list[str] = []
 
-            def receive_character(character: str) -> None:
-                rendered.append(character)
-                live.update(Markdown("".join(rendered)))
+            def receive_character(
+                character: str, _rendered: list[str] = rendered
+            ) -> None:
+                _rendered.append(character)
+                live.update(Markdown("".join(_rendered)))
 
             console.print("\n[bold]xg:[/bold]")
             with Live(Markdown(""), console=console, refresh_per_second=30) as live:
@@ -155,7 +160,7 @@ def main() -> None:
                 decision = _tool_decision()
                 if decision == "accept":
                     for tc in response.tool_calls:
-                        tm = execute_tool(tc)
+                        tm = execute_tool({"name": tc["name"], "args": tc["args"], "id": tc["id"]})
                         console.print(f"  [dim]{tm.name} -> {tm.content[:100]}[/dim]")
                         messages = tool_result(messages, tm)
                 else:

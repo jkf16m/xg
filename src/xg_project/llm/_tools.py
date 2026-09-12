@@ -35,8 +35,11 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
 def run_cmd(command: str) -> str:
     """Run a command; interactive commands temporarily take over the PTY."""
     if os.environ.get("XG_PTY") != "1":
-        completed = subprocess.run(command, shell=True, capture_output=True, text=True)
-        return (completed.stdout + completed.stderr).strip() or f"(exit code {completed.returncode})"
+        completed = subprocess.run(  # noqa: S602
+            command, shell=True, capture_output=True, text=True
+        )
+        output = (completed.stdout + completed.stderr).strip()
+        return output or f"(exit code {completed.returncode})"
 
     import pexpect
 

@@ -15,7 +15,7 @@ with a concise summary when your turn is complete."""
 
 def get_api_key() -> str:
     return subprocess.run(
-        ["pass", "show", "pi/openrouter"],
+        ["pass", "show", "pi/openrouter"],  # noqa: S607
         capture_output=True,
         text=True,
         check=True,
