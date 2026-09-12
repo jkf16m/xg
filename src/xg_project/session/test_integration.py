@@ -50,17 +50,10 @@ def test_create_makes_directory(session_dir):
 
 
 @pytest.mark.integration
-def test_create_makes_file(session_dir):
-    """create() creates the session file."""
+def test_create_has_no_messages(session_dir):
+    """create() creates a session with no messages."""
     path = create(session_dir)
-    assert path.exists()
-
-
-@pytest.mark.integration
-def test_create_file_is_empty(session_dir):
-    """create() returns an empty file."""
-    path = create(session_dir)
-    assert path.read_text() == ""
+    assert list(messages(path)) == []
 
 
 @pytest.mark.integration
@@ -128,11 +121,11 @@ def test_load_returns_latest_session(session_dir):
 
 
 @pytest.mark.integration
-def test_load_file_exists(session_dir):
-    """load() returns a path that exists on disk."""
+def test_load_file_has_no_messages(session_dir):
+    """load() returns a session with no messages."""
     create(session_dir)
     path = load(session_dir)
-    assert path.exists()
+    assert list(messages(path)) == []
 
 
 @pytest.mark.integration
@@ -158,8 +151,8 @@ def test_append_adds_message(session_dir):
     path = create(session_dir)
     msg = HumanMessage(content="hello")
     append(path, msg)
-    lines = path.read_text().strip().splitlines()
-    assert len(lines) == 1
+    result = list(messages(path))
+    assert len(result) == 1
 
 
 @pytest.mark.integration
@@ -168,8 +161,8 @@ def test_append_multiple_messages(session_dir):
     path = create(session_dir)
     append(path, HumanMessage(content="hello"))
     append(path, AIMessage(content="hi there"))
-    lines = path.read_text().strip().splitlines()
-    assert len(lines) == 2
+    result = list(messages(path))
+    assert len(result) == 2
 
 
 # --- messages() tests ---
