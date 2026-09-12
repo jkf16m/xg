@@ -4,7 +4,14 @@ from pathlib import Path
 
 from rich.console import Console
 
-from xg_project.graph import graph, initial_file_messages
+from xg_project.llm import (
+    TOOLS,
+    add_message,
+    execute_tool,
+    initial_file_messages,
+    run_turn,
+    tool_result,
+)
 
 
 def main() -> None:
@@ -20,11 +27,34 @@ def main() -> None:
             console.print()
             return
 
-        result = graph.invoke({"messages": messages, "prompt": prompt})
-        messages = result.get("messages", messages)
-        answer = messages[-1].content if messages else ""
-        if answer:
-            console.print(answer)
+        # Non-empty prompt = store it in context, no LLM call.
+        if prompt.strip():
+            messages = add_message(messages, prompt)
+            continue
+
+        # Empty prompt = one LLM call.
+        response, messages = run_turn(messages, TOOLS)
+
+        if response.content:
+            console.print(response.content)
+
+        # Show tool calls for the human to decide on.
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                console.print(f"  [dim]tool_call: {tc['name']}({tc['args']})[/dim]")
+            console.print("[yellow]Type 'y' to execute, or type a new message to continue.[/yellow]")
+
+            try:
+                decision = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                return
+
+            if decision.strip().lower() == "y":
+                for tc in response.tool_calls:
+                    tm = execute_tool(tc)
+                    console.print(f"  [dim]{tm.name}({tc['args']})[/dim]")
+                    messages = tool_result(messages, tm)
 
 
 if __name__ == "__main__":

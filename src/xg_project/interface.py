@@ -1,24 +1,24 @@
-"""Manual xg harness interface simulation."""
+"""xg harness interface — real LLM calls via llm module."""
 
+import json
 import os
 import sys
 import termios
 import tty
+from pathlib import Path
 
 from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+from langchain_core.messages import messages_from_dict, messages_to_dict
 
-
-RESPONSE = """\n## Simulated agent response
-
-The turn was triggered manually by an empty request.
-
-Automatic agent looping is disabled.
-"""
-TOOL_CALL = """\n[tool call pending]
-Press Enter to accept the tool call.
-Press Backspace to reject it.
-Type anything to interrupt it and start a new request.
-"""
+from xg_project.llm import (
+    add_message,
+    execute_tool,
+    initial_file_messages,
+    stream_turn,
+    tool_result,
+)
 
 
 def _write(text: str) -> None:
@@ -64,13 +64,13 @@ def _request_loop(history: list[str]) -> str:
             raise KeyboardInterrupt
         if key in ("\r", "\n"):
             _write("\r\n")
-            return "submit"  # Empty request: trigger a turn.
+            return "submit"
         if key.isprintable():
             _clear_line()
             value, action = _edit_request(key)
             if action == "store":
                 history.append(value)
-                return "stored"  # Stored only; do not trigger a turn.
+                return "stored"
             return "submit"
 
 
@@ -90,36 +90,81 @@ def _tool_decision() -> str:
             return key
 
 
+def _conversation_path() -> Path:
+    return Path.cwd() / ".xg" / "conversation.json"
+
+
+def _load_messages() -> list:
+    with _conversation_path().open() as stream:
+        return messages_from_dict(json.load(stream))
+
+
+def _save_messages(messages: list) -> None:
+    path = _conversation_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as stream:
+        json.dump(messages_to_dict(messages), stream, indent=2)
+
+
 def main() -> None:
     console = Console()
     console.print("[bold green]xg[/bold green] ready")
-    console.print("Manual mode: type a message to store it; press Enter on an empty prompt to send.\n")
+    console.print("Single-turn mode: type a message to store it; press Enter on an empty prompt to send.\n")
 
+    resume = os.environ.get("XG_RESUME") == "1"
+    conversation_path = _conversation_path()
+    if resume and conversation_path.exists():
+        messages = _load_messages()
+        console.print("[dim]Resumed the last conversation.[/dim]")
+    else:
+        messages = initial_file_messages(Path.cwd())
     history: list[str] = []
     old_settings = termios.tcgetattr(sys.stdin)
+
     try:
         tty.setcbreak(sys.stdin)
         while True:
             action = _request_loop(history)
             if action == "stored":
-                # Appending history is deliberately inert. No simulated agent
-                # response or tool-call state is entered here.
                 continue
 
-            console.print(RESPONSE)
-            console.print(f"Stored requests: {len(history)}")
-            console.print(TOOL_CALL)
-            decision = _tool_decision()
-            if decision == "accept":
-                console.print("[green]Tool call accepted.[/green]")
-            elif decision == "reject":
-                console.print("[yellow]Tool call rejected.[/yellow]")
-            else:
-                _clear_line()
-                _write("[Request LLM] (type to append message)\r\n")
-                value, action = _edit_request(decision)
-                if action == "store":
-                    history.append(value)
+            # Build messages from history
+            for h in history:
+                messages = add_message(messages, h)
+            history.clear()
+
+            # One LLM turn. Live re-renders the complete Markdown document as
+            # each character arrives, so headings, lists, and code fences are
+            # rendered dynamically rather than printed as plain text.
+            rendered = []
+
+            def receive_character(character: str) -> None:
+                rendered.append(character)
+                live.update(Markdown("".join(rendered)))
+
+            console.print("\n[bold]xg:[/bold]")
+            with Live(Markdown(""), console=console, refresh_per_second=30) as live:
+                response, messages = stream_turn(messages, receive_character)
+
+            # Handle tool calls
+            if response.tool_calls:
+                for tc in response.tool_calls:
+                    console.print(f"  [dim]tool_call: {tc['name']}({tc['args']})[/dim]")
+                console.print("[yellow]Press Enter to accept, Backspace to reject.[/yellow]")
+
+                decision = _tool_decision()
+                if decision == "accept":
+                    for tc in response.tool_calls:
+                        tm = execute_tool(tc)
+                        console.print(f"  [dim]{tm.name} -> {tm.content[:100]}[/dim]")
+                        messages = tool_result(messages, tm)
+                else:
+                    console.print("[yellow]Tool call rejected.[/yellow]")
+
+            _save_messages(messages)
+            console.print("\n[dim]Turn saved. Run `xg -r` to continue.[/dim]")
+            return
+
     except (KeyboardInterrupt, EOFError):
         _write("\r\n")
     finally:

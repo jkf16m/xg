@@ -42,10 +42,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(add_help=True, prog="xg")
     parser.add_argument("--start", "-s", action="store_true")
     parser.add_argument("--pty", action="store_true")
+    parser.add_argument("-r", "--resume", action="store_true", help="resume the last conversation")
     args = parser.parse_args()
 
-    if args.start or args.pty:
+    if args.start or args.pty or args.resume:
         os.environ["XG_PTY"] = "1"
+    if args.resume:
+        os.environ["XG_RESUME"] = "1"
 
     if os.environ.get("XG_PTY") == "1":
         _run_pty()
