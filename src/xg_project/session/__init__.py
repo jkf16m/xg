@@ -25,6 +25,18 @@ def _check_directory(directory: Path) -> None:
         raise TypeError(f"expected Path, got {type(directory).__name__}")
 
 
+def _extract_id(line: str) -> str | None:
+    """Extract the id field from a JSON line, or None if missing."""
+    import json
+
+    try:
+        data = json.loads(line)
+        msg_id = data.get("id")
+        return str(msg_id) if msg_id is not None else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def create(directory: Path) -> Path:
     """Create a new session file in the given directory and return its path.
 
@@ -52,7 +64,12 @@ def load(directory: Path) -> Path:
 
 def append(path: Path, message: BaseMessage) -> None:
     """Append a single message to the session file."""
-    ...
+    import json
+
+    data = message.model_dump()
+    line = json.dumps(data) + "\n"
+    with open(path, "a") as f:
+        f.write(line)
 
 
 def remove(path: Path, message_id: str) -> None:
@@ -60,7 +77,9 @@ def remove(path: Path, message_id: str) -> None:
 
     Rewrites the file without the matching line.
     """
-    ...
+    lines = path.read_text().splitlines()
+    kept = [line for line in lines if message_id is None or _extract_id(line) != message_id]
+    path.write_text("\n".join(kept) + ("\n" if kept else ""))
 
 
 def messages(path: Path) -> Iterator[BaseMessage]:
@@ -68,8 +87,28 @@ def messages(path: Path) -> Iterator[BaseMessage]:
 
     Reads lazily — does not load the full file into memory.
     """
-    if False:
-        yield
+    import json
+
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+    TYPE_MAP = {
+        "ai": AIMessage,
+        "human": HumanMessage,
+        "system": SystemMessage,
+        "tool": ToolMessage,
+    }
+
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            msg_type = data.pop("type", None)
+            cls = TYPE_MAP.get(msg_type)
+            if cls is None:
+                continue
+            yield cls(**data)
 
 
 def stream(path: Path) -> Iterator[bytes]:
@@ -77,5 +116,7 @@ def stream(path: Path) -> Iterator[bytes]:
 
     Use this to stream the session into an HTTP body or buffer.
     """
-    if False:
-        yield
+    with open(path, "rb") as f:
+        for line in f:
+            if line.strip():
+                yield line

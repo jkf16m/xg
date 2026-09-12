@@ -4,8 +4,9 @@ import time
 from pathlib import Path
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
-from xg_project.session import LAST_FILE, create, load
+from xg_project.session import LAST_FILE, append, create, load, messages, remove, stream
 
 
 @pytest.fixture
@@ -146,3 +147,106 @@ def test_load_requires_path():
     """load() raises TypeError if not given a Path."""
     with pytest.raises(TypeError):
         load("/not/a/path")  # type: ignore[arg-type]
+
+
+# --- append() tests ---
+
+
+@pytest.mark.integration
+def test_append_adds_message(session_dir):
+    """append() adds a message to the session file."""
+    path = create(session_dir)
+    msg = HumanMessage(content="hello")
+    append(path, msg)
+    lines = path.read_text().strip().splitlines()
+    assert len(lines) == 1
+
+
+@pytest.mark.integration
+def test_append_multiple_messages(session_dir):
+    """append() can add multiple messages."""
+    path = create(session_dir)
+    append(path, HumanMessage(content="hello"))
+    append(path, AIMessage(content="hi there"))
+    lines = path.read_text().strip().splitlines()
+    assert len(lines) == 2
+
+
+# --- messages() tests ---
+
+
+@pytest.mark.integration
+def test_messages_returns_iterator(session_dir):
+    """messages() returns an iterator of BaseMessage objects."""
+    path = create(session_dir)
+    append(path, HumanMessage(content="hello"))
+    append(path, AIMessage(content="hi there"))
+    result = list(messages(path))
+    assert len(result) == 2
+    assert isinstance(result[0], HumanMessage)
+    assert isinstance(result[1], AIMessage)
+
+
+@pytest.mark.integration
+def test_messages_preserves_content(session_dir):
+    """messages() preserves message content."""
+    path = create(session_dir)
+    append(path, HumanMessage(content="test content"))
+    result = list(messages(path))
+    assert result[0].content == "test content"
+
+
+@pytest.mark.integration
+def test_messages_empty_file(session_dir):
+    """messages() returns nothing for an empty session."""
+    path = create(session_dir)
+    result = list(messages(path))
+    assert result == []
+
+
+# --- remove() tests ---
+
+
+@pytest.mark.integration
+def test_remove_by_id(session_dir):
+    """remove() removes a message by its id."""
+    path = create(session_dir)
+    msg = HumanMessage(content="to remove", id="msg-to-remove")
+    append(path, msg)
+    append(path, AIMessage(content="to keep", id="msg-to-keep"))
+    remove(path, msg.id)
+    result = list(messages(path))
+    assert len(result) == 1
+    assert result[0].content == "to keep"
+
+
+@pytest.mark.integration
+def test_remove_nonexistent_id(session_dir):
+    """remove() with nonexistent id leaves file unchanged."""
+    path = create(session_dir)
+    append(path, HumanMessage(content="keep me"))
+    remove(path, "nonexistent-id")
+    result = list(messages(path))
+    assert len(result) == 1
+
+
+# --- stream() tests ---
+
+
+@pytest.mark.integration
+def test_stream_returns_bytes(session_dir):
+    """stream() yields bytes."""
+    path = create(session_dir)
+    append(path, HumanMessage(content="hello"))
+    result = list(stream(path))
+    assert len(result) == 1
+    assert isinstance(result[0], bytes)
+
+
+@pytest.mark.integration
+def test_stream_contains_message(session_dir):
+    """stream() yields the serialized message."""
+    path = create(session_dir)
+    append(path, HumanMessage(content="stream me"))
+    result = list(stream(path))
+    assert b"stream me" in result[0]

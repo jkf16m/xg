@@ -94,9 +94,9 @@ def execute_tool(tool_call: dict[str, object]) -> ToolMessage:
     tool_fn = {t.name: t for t in TOOLS}[name]
     try:
         result = tool_fn.invoke(args)
+        return ToolMessage(content=str(result), tool_call_id=tool_id, name=name)
     except Exception as exc:
-        result = f"error: {exc}"
-    return ToolMessage(content=str(result), tool_call_id=tool_id, name=name)
+        return ToolMessage(content=str(exc), tool_call_id=tool_id, name=name, status="error")
 
 
 def tool_result(messages: list[BaseMessage], tool_message: ToolMessage) -> list[BaseMessage]:
