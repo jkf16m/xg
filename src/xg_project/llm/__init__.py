@@ -2,13 +2,10 @@
 
 Public API
 ----------
-Context:
-    initial_file_messages(root) -> list[BaseMessage]
-
 Conversation:
     add_message(msgs, text) -> list[BaseMessage]
-    stream_turn(msgs, on_text) -> (response, msgs)
-    run_turn(msgs) -> (response, msgs)
+    stream_turn(msgs, config, on_text) -> (response, msgs)
+    run_turn(msgs, config) -> (response, msgs)
 
 Tools:
     execute_tool(tc) -> ToolMessage
@@ -17,7 +14,6 @@ Tools:
 """
 
 from collections.abc import Callable
-from pathlib import Path
 
 from langchain_core.messages import (
     AIMessage,
@@ -27,28 +23,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from xg_project.config import Config
 from xg_project.llm._api import SYSTEM, get_llm
-from xg_project.llm._context import project_files
 from xg_project.llm._tools import TOOLS
-
-
-def initial_file_messages(root: Path | None = None) -> list[BaseMessage]:
-    """Materialize the launch snapshot as read-tool-call/tool-result messages."""
-    root = (root or Path.cwd()).resolve()
-    result: list[BaseMessage] = []
-    for number, path in enumerate(project_files(root), 1):
-        try:
-            content = path.read_text()
-        except (UnicodeDecodeError, OSError) as exc:
-            content = f"[unreadable file: {exc}]"
-        tool_id = f"launch-read-{number}"
-        result.extend([
-            AIMessage(content="", tool_calls=[{
-                "name": "read_file", "args": {"path": str(path)}, "id": tool_id, "type": "tool_call"
-            }]),
-            ToolMessage(content=content, tool_call_id=tool_id, name="read_file"),
-        ])
-    return result
+from xg_project.session import append as session_append
 
 
 def add_message(messages: list[BaseMessage], text: str) -> list[BaseMessage]:
@@ -56,8 +34,15 @@ def add_message(messages: list[BaseMessage], text: str) -> list[BaseMessage]:
     return messages + [HumanMessage(content=text)]
 
 
+def _persist(config: Config | None, message: BaseMessage) -> None:
+    """Append a message to the session if configured."""
+    if config is not None and config.session_path is not None:
+        session_append(config.session_path, message)
+
+
 def stream_turn(
     messages: list[BaseMessage],
+    config: Config | None = None,
     on_text: Callable[[str], None] | None = None,
 ) -> tuple[AIMessage, list[BaseMessage]]:
     """Stream exactly one LLM turn, calling on_text(char) for each character."""
@@ -76,13 +61,18 @@ def stream_turn(
 
     if response is None:
         response = AIMessage(content="")
+    _persist(config, response)
     return response, messages + [response]
 
 
-def run_turn(messages: list[BaseMessage]) -> tuple[AIMessage, list[BaseMessage]]:
+def run_turn(
+    messages: list[BaseMessage],
+    config: Config | None = None,
+) -> tuple[AIMessage, list[BaseMessage]]:
     """Make one non-streaming LLM call."""
     llm = get_llm().bind_tools(TOOLS)
     response = llm.invoke([SystemMessage(content=SYSTEM), *messages])
+    _persist(config, response)
     return response, messages + [response]
 
 

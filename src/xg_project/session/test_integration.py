@@ -6,7 +6,16 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from xg_project.session import LAST_FILE, append, create, load, messages, remove, stream
+from xg_project.session import (
+    LAST_FILE,
+    append,
+    create,
+    file_context,
+    load,
+    messages,
+    remove,
+    stream,
+)
 
 
 @pytest.fixture
@@ -243,3 +252,48 @@ def test_stream_contains_message(session_dir):
     append(path, HumanMessage(content="stream me"))
     result = list(stream(path))
     assert b"stream me" in result[0]
+
+
+# --- file_context() tests ---
+
+
+@pytest.mark.integration
+def test_file_context_returns_list():
+    """file_context() returns a list."""
+    result = file_context(Path("."))
+    assert isinstance(result, list)
+
+
+@pytest.mark.integration
+def test_file_context_contains_messages():
+    """file_context() returns BaseMessage objects."""
+    from langchain_core.messages import BaseMessage
+
+    result = file_context(Path("."))
+    for msg in result:
+        assert isinstance(msg, BaseMessage)
+
+
+@pytest.mark.integration
+def test_file_context_has_tool_calls():
+    """file_context() has AIMessage with tool calls."""
+    result = file_context(Path("."))
+    ai_msgs = [m for m in result if isinstance(m, AIMessage)]
+    assert len(ai_msgs) > 0
+    assert ai_msgs[0].tool_calls
+
+
+@pytest.mark.integration
+def test_file_context_uses_session_if_exists(tmp_path):
+    """file_context() loads from session if messages exist."""
+    from xg_project.config import Config
+    from xg_project.session import append, create
+
+    session_dir = tmp_path / "sessions"
+    path = create(session_dir)
+    append(path, HumanMessage(content="existing"))
+
+    config = Config(session_path=path)
+    result = file_context(tmp_path, config)
+    assert len(result) == 1
+    assert result[0].content == "existing"

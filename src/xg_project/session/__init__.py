@@ -9,6 +9,7 @@ Public API
     messages(path) -> Iterator[BaseMessage]
     stream(path) -> Iterator[bytes]
     migrate() -> None
+    file_context(directory, config) -> list[BaseMessage]
 """
 
 import json
@@ -18,6 +19,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+
+from xg_project.config import Config
 
 DB_DIR = Path.home() / ".xg"
 DB_PATH = DB_DIR / "sessions.db"
@@ -194,3 +197,31 @@ def stream(path: Path) -> Iterator[bytes]:
     ).fetchall()
     for (data_str,) in rows:
         yield (data_str + "\n").encode()
+
+
+def file_context(directory: Path, config: Config | None = None) -> list[BaseMessage]:
+    """Create deterministic read tool calls ordered by mtime."""
+    from xg_project.llm._context import project_files
+
+    root = directory.resolve()
+    session_path = config.session_path if config else None
+
+    if session_path:
+        existing = list(messages(session_path))
+        if existing:
+            return existing
+
+    result: list[BaseMessage] = []
+    for number, path in enumerate(project_files(root), 1):
+        try:
+            content = path.read_text()
+        except (UnicodeDecodeError, OSError) as exc:
+            content = f"[unreadable file: {exc}]"
+        tool_id = f"launch-read-{number}"
+        result.extend([
+            AIMessage(content="", tool_calls=[{
+                "name": "read_file", "args": {"path": str(path)}, "id": tool_id, "type": "tool_call"
+            }]),
+            ToolMessage(content=content, tool_call_id=tool_id, name="read_file"),
+        ])
+    return result
