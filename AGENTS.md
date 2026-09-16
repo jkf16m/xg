@@ -1,50 +1,25 @@
-# xg-project Agent Instructions
+# xg-project
 
 ## Build & Lint
-
-Run `build.py` to execute all checks:
 
 ```sh
 uv run python build.py
 ```
 
-This runs:
-- **ruff** — linting (E, F, I, B, S, UP rules)
-
-## Testing
-
-Run integration tests:
+## Tests
 
 ```sh
 uv run pytest -m integration -v src/
 ```
 
-## Module Structure
+## Key Files
 
-### `xg_project.llm`
+- `src/xg_project/llm/__init__.py` — LLM API surface
+- `src/xg_project/session/__init__.py` — persistence layer
+- `src/xg_project/interface.py` — REPL entry point
 
-Public API — import only from this:
+## Trust Rules
 
-```python
-from xg_project.llm import (
-    create,
-    load,
-    append,
-    remove,
-    messages,
-    stream,
-    TOOLS,
-)
-```
-
-Private implementation lives in `_`-prefixed modules (`_api.py`, `_tools.py`, `_context.py`).
-
-### `xg_project.session`
-
-Public API — import only from this:
-
-```python
-from xg_project.session import create, load, append, remove, messages, stream
-```
-
-Functions take a `Path` as first argument. No classes — pure functions only.
+- Trust the context window. Read files before editing.
+- Trust your training on language fundamentals and programming principles.
+- Do not trust your training on library APIs. If you need to use a library and its API is not in the context window, stop and ask the user to provide documentation or run research.

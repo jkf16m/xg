@@ -10,8 +10,10 @@ requires-python = ">=3.12"
 dependencies = [
     "langchain-core>=0.3.0",
     "langchain-openrouter>=0.2.8",
+    "pathspec>=1.0.0",
     "pexpect>=4.9.0",
     "rich>=15.0.0",
+    "sqlite-utils>=4.2.1",
 ]
 
 [project.scripts]

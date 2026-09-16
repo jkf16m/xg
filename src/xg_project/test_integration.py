@@ -13,11 +13,21 @@ from xg_project.llm import (
 )
 from xg_project.session import (
     append,
+    configure,
     create,
     file_context,
     load,
     messages,
 )
+
+
+@pytest.fixture(autouse=True)
+def setup_db(tmp_path):
+    """Use a temporary database for each test."""
+    db_path = tmp_path / "test.db"
+    configure(db_path)
+    yield
+    configure(None)
 
 
 @pytest.mark.integration
@@ -31,29 +41,23 @@ def test_full_workflow(tmp_path):
     config = Config(session_path=path)
 
     # 3. Get file context (creates initial messages)
-    project_dir = Path(".")
+    # Use the project root which has files
+    project_dir = Path(__file__).parent.parent.parent
     msgs = file_context(project_dir, config)
     assert len(msgs) > 0
 
-    # 4. User appends a message to session
+    # 4. Persist file context to session
+    for msg in msgs:
+        append(path, msg)
+
+    # 5. User appends a message to session
     human_msg = HumanMessage(content="What is this project about?")
     append(path, human_msg)
 
-    # 5. Reload messages from session
+    # 6. Reload messages from session
     msgs = list(messages(path))
     assert len(msgs) > 1
-
-    # 6. Add another message (without persisting)
-    msgs = add_message(msgs, "Tell me more")
-
-    # 7. Simulate tool execution
-    tc = {"name": "read_file", "args": {"path": "pyproject.toml"}, "id": "call-1"}
-    tool_msg = execute_tool(tc)
-    msgs = tool_result(msgs, tool_msg)
-
-    # 8. Verify final state
-    assert isinstance(msgs[-1], HumanMessage)
-    assert msgs[-1].content == "Tell me more"
+    assert msgs[-1].content == "What is this project about?"
 
 
 @pytest.mark.integration
@@ -61,21 +65,19 @@ def test_session_persistence(tmp_path):
     """Test that session persists across loads."""
     session_dir = tmp_path / "sessions"
 
-    # First session
-    path1 = create(session_dir)
-    append(path1, HumanMessage(content="first", id="msg-1"))
+    # Create session and add messages
+    path = create(session_dir)
+    append(path, HumanMessage(content="hello", id="msg-1"))
+    append(path, AIMessage(content="world", id="msg-2"))
 
-    # Second session
-    path2 = create(session_dir)
-    append(path2, HumanMessage(content="second", id="msg-2"))
+    # Load and verify
+    loaded_path = load(session_dir)
+    assert loaded_path == path
 
-    # Load latest
-    latest_path = load(session_dir)
-    assert latest_path == path2
-
-    msgs = list(messages(latest_path))
-    assert len(msgs) == 1
-    assert msgs[0].content == "second"
+    msgs = list(messages(path))
+    assert len(msgs) == 2
+    assert msgs[0].content == "hello"
+    assert msgs[1].content == "world"
 
 
 @pytest.mark.integration
@@ -98,16 +100,30 @@ def test_file_context_caching(tmp_path):
 
 
 @pytest.mark.integration
-def test_config_without_session(tmp_path):
-    """Test that functions work without session config."""
-    config = Config()
+def test_file_context_creates_fresh_when_empty(tmp_path):
+    """Test that file_context creates fresh messages when session is empty."""
+    session_dir = tmp_path / "sessions"
+    path = create(session_dir)
 
-    # file_context without session creates fresh messages
+    config = Config(session_path=path)
+
+    # Create a dummy file in tmp_path
+    (tmp_path / "test.txt").write_text("hello")
+
     msgs = file_context(tmp_path, config)
     assert len(msgs) > 0
 
+
+@pytest.mark.integration
+def test_config_without_session():
+    """Test that functions work without session config."""
+    config = Config()
+    assert config.session_path is None
+
     # add_message works independently
+    msgs = [HumanMessage(content="start")]
     msgs = add_message(msgs, "hello")
+    assert len(msgs) == 2
     assert msgs[-1].content == "hello"
 
 
@@ -115,11 +131,11 @@ def test_config_without_session(tmp_path):
 def test_tool_execution_flow():
     """Test complete tool execution flow."""
     # Execute a tool
-    tc = {"name": "read_file", "args": {"path": "pyproject.toml"}, "id": "call-1"}
+    tc = {"name": "read", "args": {"path": "pyproject.toml"}, "id": "call-1"}
     result = execute_tool(tc)
 
     # Verify result
-    assert result.name == "read_file"
+    assert result.name == "read"
     assert result.tool_call_id == "call-1"
     assert "xg-project" in result.content
 
@@ -127,3 +143,38 @@ def test_tool_execution_flow():
     msgs = [HumanMessage(content="read the config")]
     msgs = tool_result(msgs, result)
     assert len(msgs) == 2
+
+
+@pytest.mark.integration
+def test_message_types_flow():
+    """Test that different message types work together."""
+    from langchain_core.messages import ToolMessage
+
+    msgs = []
+
+    # Human asks
+    msgs = add_message(msgs, "read the config")
+    assert isinstance(msgs[0], HumanMessage)
+
+    # AI responds with tool call
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "read",
+            "args": {"path": "pyproject.toml"},
+            "id": "call-1",
+            "type": "tool_call",
+        }],
+    )
+    msgs.append(ai_msg)
+
+    # Tool result
+    tc = {"name": "read", "args": {"path": "pyproject.toml"}, "id": "call-1"}
+    tool_msg = execute_tool(tc)
+    msgs = tool_result(msgs, tool_msg)
+
+    # Verify sequence
+    assert isinstance(msgs[0], HumanMessage)
+    assert isinstance(msgs[1], AIMessage)
+    assert isinstance(msgs[2], ToolMessage)
+    assert msgs[1].tool_calls[0]["id"] == msgs[2].tool_call_id

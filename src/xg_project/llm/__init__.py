@@ -24,7 +24,7 @@ from langchain_core.messages import (
 )
 
 from xg_project.config import Config
-from xg_project.llm._api import SYSTEM, get_llm
+from xg_project.llm._api import get_llm, system_prompt
 from xg_project.llm._tools import TOOLS
 from xg_project.session import append as session_append
 
@@ -48,7 +48,7 @@ def stream_turn(
     """Stream exactly one LLM turn, calling on_text(char) for each character."""
     llm = get_llm().bind_tools(TOOLS)
     response: AIMessage | None = None
-    for chunk in llm.stream([SystemMessage(content=SYSTEM), *messages]):
+    for chunk in llm.stream([SystemMessage(content=system_prompt()), *messages]):
         content = chunk.content
         if isinstance(content, str):
             for character in content:
@@ -71,7 +71,7 @@ def run_turn(
 ) -> tuple[AIMessage, list[BaseMessage]]:
     """Make one non-streaming LLM call."""
     llm = get_llm().bind_tools(TOOLS)
-    response = llm.invoke([SystemMessage(content=SYSTEM), *messages])
+    response = llm.invoke([SystemMessage(content=system_prompt()), *messages])
     _persist(config, response)
     return response, messages + [response]
 

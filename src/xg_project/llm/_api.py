@@ -1,6 +1,7 @@
 """Private: OpenRouter LLM configuration."""
 
 import subprocess
+from pathlib import Path
 
 from langchain_openrouter import ChatOpenRouter
 
@@ -9,8 +10,20 @@ SYSTEM = """You are xg, a coding agent in a 1:1 human-guided loop.
 There is exactly one agent turn for each human message. Do not invent a task,
 do not stop because of a stop reason, and do not ask for confirmation before
 using tools. The launch context contains the current project files in mtime
-order. A read_file call appends that file to the bottom of context. Respond
+order. A read call appends that file to the bottom of context. Respond
 with a concise summary when your turn is complete."""
+SYSTEM_FILE = Path(".xg") / "SYSTEM.md"
+
+
+def system_prompt(root: Path | None = None) -> str:
+    """Return the system prompt for a project root.
+
+    ``<root>/.xg/SYSTEM.md`` replaces the built-in default when it exists.
+    """
+    path = (root or Path.cwd()).resolve() / SYSTEM_FILE
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return SYSTEM
 
 
 def get_api_key() -> str:

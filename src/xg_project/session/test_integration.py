@@ -7,8 +7,8 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from xg_project.session import (
-    LAST_FILE,
     append,
+    configure,
     create,
     file_context,
     load,
@@ -16,6 +16,15 @@ from xg_project.session import (
     remove,
     stream,
 )
+
+
+@pytest.fixture(autouse=True)
+def setup_db(tmp_path):
+    """Use a temporary database for each test."""
+    db_path = tmp_path / "test.db"
+    configure(db_path)
+    yield
+    configure(None)
 
 
 @pytest.fixture
@@ -42,20 +51,12 @@ def test_create_file_has_jsonl_extension(session_dir):
 
 
 @pytest.mark.integration
-def test_create_file_name_is_timestamp(session_dir):
-    """create() names the file with a UNIX timestamp."""
-    before = int(time.time())
+def test_create_stores_in_db(session_dir):
+    """create() stores the session in the database."""
     path = create(session_dir)
-    after = int(time.time())
-    name = int(path.stem)
-    assert before <= name <= after
-
-
-@pytest.mark.integration
-def test_create_makes_directory(session_dir):
-    """create() creates the directory if it doesn't exist."""
-    create(session_dir)
-    assert session_dir.exists()
+    # Verify the session is queryable
+    loaded = load(session_dir)
+    assert loaded == path
 
 
 @pytest.mark.integration
@@ -63,33 +64,6 @@ def test_create_has_no_messages(session_dir):
     """create() creates a session with no messages."""
     path = create(session_dir)
     assert list(messages(path)) == []
-
-
-@pytest.mark.integration
-def test_create_makes_last_pointer(session_dir):
-    """create() creates a .last pointer file."""
-    create(session_dir)
-    last = session_dir / LAST_FILE
-    assert last.exists()
-
-
-@pytest.mark.integration
-def test_create_last_points_to_new_file(session_dir):
-    """create() makes .last point to the new session file."""
-    path = create(session_dir)
-    last = session_dir / LAST_FILE
-    assert last.read_text() == path.name
-
-
-@pytest.mark.integration
-def test_create_last_overwrites_on_new_session(session_dir):
-    """create() updates .last when creating a new session."""
-    first = create(session_dir)
-    time.sleep(1.1)
-    second = create(session_dir)
-    last = session_dir / LAST_FILE
-    assert last.read_text() == second.name
-    assert first.name != second.name
 
 
 @pytest.mark.integration
@@ -112,7 +86,7 @@ def test_load_returns_path(session_dir):
 
 @pytest.mark.integration
 def test_load_returns_same_file_as_create(session_dir):
-    """load() returns the same file that create() made."""
+    """load() returns the same path that create() made."""
     created = create(session_dir)
     loaded = load(session_dir)
     assert created == loaded
@@ -156,7 +130,7 @@ def test_load_requires_path():
 
 @pytest.mark.integration
 def test_append_adds_message(session_dir):
-    """append() adds a message to the session file."""
+    """append() adds a message to the session."""
     path = create(session_dir)
     msg = HumanMessage(content="hello")
     append(path, msg)
@@ -199,11 +173,22 @@ def test_messages_preserves_content(session_dir):
 
 
 @pytest.mark.integration
-def test_messages_empty_file(session_dir):
+def test_messages_empty_session(session_dir):
     """messages() returns nothing for an empty session."""
     path = create(session_dir)
     result = list(messages(path))
     assert result == []
+
+
+@pytest.mark.integration
+def test_messages_does_not_mutate_data(session_dir):
+    """messages() should not mutate the underlying data."""
+    path = create(session_dir)
+    append(path, HumanMessage(content="test"))
+    first = list(messages(path))
+    second = list(messages(path))
+    assert len(first) == len(second)
+    assert first[0].content == second[0].content
 
 
 # --- remove() tests ---
@@ -224,7 +209,7 @@ def test_remove_by_id(session_dir):
 
 @pytest.mark.integration
 def test_remove_nonexistent_id(session_dir):
-    """remove() with nonexistent id leaves file unchanged."""
+    """remove() with nonexistent id leaves session unchanged."""
     path = create(session_dir)
     append(path, HumanMessage(content="keep me"))
     remove(path, "nonexistent-id")
@@ -287,7 +272,6 @@ def test_file_context_has_tool_calls():
 def test_file_context_uses_session_if_exists(tmp_path):
     """file_context() loads from session if messages exist."""
     from xg_project.config import Config
-    from xg_project.session import append, create
 
     session_dir = tmp_path / "sessions"
     path = create(session_dir)
@@ -297,3 +281,36 @@ def test_file_context_uses_session_if_exists(tmp_path):
     result = file_context(tmp_path, config)
     assert len(result) == 1
     assert result[0].content == "existing"
+
+
+# --- configure() tests ---
+
+
+@pytest.mark.integration
+def test_configure_resets_to_default(tmp_path):
+    """configure(None) resets to default path."""
+    custom = tmp_path / "custom.db"
+    configure(custom)
+    configure(None)
+    from xg_project.session import DEFAULT_DB_PATH
+    from xg_project.session import _db_path as current_path
+    assert current_path == DEFAULT_DB_PATH
+
+
+# --- directory isolation tests ---
+
+
+@pytest.mark.integration
+def test_sessions_are_isolated_by_directory(tmp_path):
+    """load() returns the most recent session per directory, not globally."""
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+
+    path_a = create(dir_a)
+    time.sleep(0.1)
+    path_b = create(dir_b)
+
+    loaded_a = load(dir_a)
+    loaded_b = load(dir_b)
+    assert loaded_a == path_a
+    assert loaded_b == path_b

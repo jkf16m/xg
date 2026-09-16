@@ -11,6 +11,17 @@ from xg_project.llm import (
     execute_tool,
     tool_result,
 )
+from xg_project.session import configure
+
+
+@pytest.fixture(autouse=True)
+def setup_db(tmp_path):
+    """Use a temporary database for each test."""
+    db_path = tmp_path / "test.db"
+    configure(db_path)
+    yield
+    configure(None)
+
 
 # --- add_message() tests ---
 
@@ -55,7 +66,7 @@ def test_add_message_does_not_mutate():
 @pytest.mark.integration
 def test_execute_tool_returns_tool_message():
     """execute_tool() returns a ToolMessage."""
-    tc = {"name": "read_file", "args": {"path": "pyproject.toml"}, "id": "test-1"}
+    tc = {"name": "read", "args": {"path": "pyproject.toml"}, "id": "test-1"}
     result = execute_tool(tc)
     assert isinstance(result, ToolMessage)
 
@@ -63,7 +74,7 @@ def test_execute_tool_returns_tool_message():
 @pytest.mark.integration
 def test_execute_tool_preserves_id():
     """execute_tool() preserves the tool_call_id."""
-    tc = {"name": "read_file", "args": {"path": "pyproject.toml"}, "id": "my-id"}
+    tc = {"name": "read", "args": {"path": "pyproject.toml"}, "id": "my-id"}
     result = execute_tool(tc)
     assert result.tool_call_id == "my-id"
 
@@ -71,15 +82,15 @@ def test_execute_tool_preserves_id():
 @pytest.mark.integration
 def test_execute_tool_preserves_name():
     """execute_tool() preserves the tool name."""
-    tc = {"name": "read_file", "args": {"path": "pyproject.toml"}, "id": "test-1"}
+    tc = {"name": "read", "args": {"path": "pyproject.toml"}, "id": "test-1"}
     result = execute_tool(tc)
-    assert result.name == "read_file"
+    assert result.name == "read"
 
 
 @pytest.mark.integration
 def test_execute_tool_error_returns_error_status():
     """execute_tool() returns error status on failure."""
-    tc = {"name": "read_file", "args": {"path": "/nonexistent"}, "id": "test-err"}
+    tc = {"name": "read", "args": {"path": "/nonexistent"}, "id": "test-err"}
     result = execute_tool(tc)
     assert result.status == "error"
 
@@ -145,3 +156,103 @@ def test_config_with_session_path(tmp_path):
     session_path = tmp_path / "session.jsonl"
     config = Config(session_path=session_path)
     assert config.session_path == session_path
+
+
+# --- system_prompt() tests ---
+
+
+@pytest.mark.integration
+def test_system_prompt_falls_back_to_default(tmp_path):
+    """system_prompt() uses the built-in default without .xg/SYSTEM.md."""
+    from xg_project.llm._api import SYSTEM, system_prompt
+
+    assert system_prompt(tmp_path) == SYSTEM
+
+
+@pytest.mark.integration
+def test_system_prompt_reads_system_file(tmp_path):
+    """system_prompt() reads .xg/SYSTEM.md when present."""
+    from xg_project.llm._api import system_prompt
+
+    system_dir = tmp_path / ".xg"
+    system_dir.mkdir()
+    (system_dir / "SYSTEM.md").write_text("custom prompt", encoding="utf-8")
+
+    assert system_prompt(tmp_path) == "custom prompt"
+
+
+@pytest.mark.integration
+def test_system_prompt_defaults_to_cwd(tmp_path, monkeypatch):
+    """system_prompt() resolves against the current working directory by default."""
+    from xg_project.llm._api import SYSTEM, system_prompt
+
+    monkeypatch.chdir(tmp_path)
+
+    assert system_prompt() == SYSTEM
+
+
+# --- project_files() module discovery tests ---
+
+
+def _write_config(root, body):
+    config_dir = root / ".xg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(body, encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_project_files_uses_module_allowlist(tmp_path):
+    """A module with files keeps only listed paths in its subtree."""
+    from xg_project.llm._context import project_files
+
+    module = tmp_path / "pkg"
+    _write_config(module, '{"files": ["keep.py"]}')
+    (module / "keep.py").write_text("")
+    (module / "drop.py").write_text("")
+
+    names = {path.name for path in project_files(tmp_path, use_gitignore=False)}
+
+    assert "keep.py" in names
+    assert "drop.py" not in names
+
+
+@pytest.mark.integration
+def test_project_files_module_without_files_keeps_subtree(tmp_path):
+    """A module without a files key does not restrict its subtree."""
+    from xg_project.llm._context import project_files
+
+    module = tmp_path / "pkg"
+    _write_config(module, '{"use_gitignore": false}')
+    (module / "keep.py").write_text("")
+
+    names = {path.name for path in project_files(tmp_path, use_gitignore=False)}
+
+    assert "keep.py" in names
+
+
+@pytest.mark.integration
+def test_project_files_empty_allowlist_keeps_nothing(tmp_path):
+    """An explicit empty files list keeps no files in the module subtree."""
+    from xg_project.llm._context import project_files
+
+    module = tmp_path / "pkg"
+    _write_config(module, '{"files": []}')
+    (module / "drop.py").write_text("")
+
+    names = {path.name for path in project_files(tmp_path, use_gitignore=False)}
+
+    assert "drop.py" not in names
+
+
+@pytest.mark.integration
+def test_load_context_module_requires_config(tmp_path):
+    """A directory is a module only when .xg/config.json exists."""
+    from xg_project.llm._context import load_context_module
+
+    assert load_context_module(tmp_path) is None
+
+    _write_config(tmp_path, "{}")
+
+    module = load_context_module(tmp_path)
+    assert module is not None
+    assert module.files is None
