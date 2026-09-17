@@ -56,18 +56,32 @@ def cmd(command: str) -> str:
         timeout=None,
         dimensions=(24, 80),
     )
+    seen: list[str] = []
+
+    def collect(data: bytes) -> bytes:
+        """Record every chunk the child prints so the model can see it.
+
+        ``interact`` reads the pty directly and never fills ``child.before``,
+        so this filter is the only place the output can be captured from.
+        """
+        seen.append(data.decode("utf-8", errors="replace"))
+        return data
+
     try:
         child.setecho(False)
         if sys.stdin.isatty():
-            child.interact(escape_character=None)
+            child.interact(escape_character=None, output_filter=collect)
+            output = "".join(seen)
         else:
             child.expect(pexpect.EOF)
-        output = child.before or ""
+            output = child.before or ""
         status = child.exitstatus
     finally:
         child.close(force=True)
 
-    return output.strip() or f"(exit code {status or 0})"
+    return output.replace("\r\n", "\n").replace("\r", "\n").strip() or (
+        f"(exit code {status or 0})"
+    )
 
 
 TOOLS = [read, write, edit, cmd]

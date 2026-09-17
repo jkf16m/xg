@@ -1,35 +1,19 @@
 """Private: project file discovery."""
 
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
 from pathspec.gitignore import GitIgnoreSpec
 
-from xg_project.config import load_project_config
+from xg_project.config import MODULE_FILE_NAME, XG_DIR_NAME, Module, load_module
 
 
-@dataclass(frozen=True)
-class ContextModule:
-    """Configuration for a context module rooted at a directory.
-
-    ``files`` is an allowlist of paths relative to ``root``. ``None`` means the
-    module declares no allowlist and does not restrict its subtree.
-    """
-
-    root: Path
-    files: tuple[str, ...] | None
-
-
-def load_context_module(root: Path) -> ContextModule | None:
-    """Load ``root/.xg/config.json`` as a module declaration.
+def load_context_module(root: Path) -> Module | None:
+    """Load ``root/.xg/module.json`` as a module declaration.
 
     Returns ``None`` when the directory is not an xg module.
     """
-    root = root.resolve()
-    if not (root / ".xg" / "config.json").is_file():
-        return None
-    return ContextModule(root=root, files=load_project_config(root).files)
+    return load_module(root)
 
 
 def project_files(
@@ -49,7 +33,7 @@ def project_files(
     # A module declaration replaces recursive discovery for that module root.
     # The nearest module declaration wins for nested modules.
     modules = []
-    for module_path in root.rglob(".xg/config.json"):
+    for module_path in root.rglob(f"{XG_DIR_NAME}/{MODULE_FILE_NAME}"):
         module_root = module_path.parent.parent.resolve()
         module = load_context_module(module_root)
         if module is not None:

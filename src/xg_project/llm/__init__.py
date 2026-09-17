@@ -6,6 +6,7 @@ Conversation:
     add_message(msgs, text) -> list[BaseMessage]
     stream_turn(msgs, config, on_text) -> (response, msgs)
     run_turn(msgs, config) -> (response, msgs)
+    ProviderError -> provider-side failure the user can retry
 
 Tools:
     execute_tool(tc) -> ToolMessage
@@ -22,11 +23,21 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from openrouter.errors import OpenRouterError
 
 from xg_project.config import Config
 from xg_project.llm._api import get_llm, system_prompt
 from xg_project.llm._tools import TOOLS
 from xg_project.session import append as session_append
+
+
+class ProviderError(RuntimeError):
+    """A provider-side failure (rate limit, outage) that the user can retry."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
 
 
 def add_message(messages: list[BaseMessage], text: str) -> list[BaseMessage]:
@@ -48,16 +59,19 @@ def stream_turn(
     """Stream exactly one LLM turn, calling on_text(char) for each character."""
     llm = get_llm().bind_tools(TOOLS)
     response: AIMessage | None = None
-    for chunk in llm.stream([SystemMessage(content=system_prompt()), *messages]):
-        content = chunk.content
-        if isinstance(content, str):
-            for character in content:
-                if on_text is not None:
-                    on_text(character)
-        if response is None:
-            response = chunk
-        else:
-            response = response + chunk
+    try:
+        for chunk in llm.stream([SystemMessage(content=system_prompt()), *messages]):
+            content = chunk.content
+            if isinstance(content, str):
+                for character in content:
+                    if on_text is not None:
+                        on_text(character)
+            if response is None:
+                response = chunk
+            else:
+                response = response + chunk
+    except OpenRouterError as exc:
+        raise ProviderError(str(exc), exc.status_code) from exc
 
     if response is None:
         response = AIMessage(content="")
@@ -71,7 +85,10 @@ def run_turn(
 ) -> tuple[AIMessage, list[BaseMessage]]:
     """Make one non-streaming LLM call."""
     llm = get_llm().bind_tools(TOOLS)
-    response = llm.invoke([SystemMessage(content=system_prompt()), *messages])
+    try:
+        response = llm.invoke([SystemMessage(content=system_prompt()), *messages])
+    except OpenRouterError as exc:
+        raise ProviderError(str(exc), exc.status_code) from exc
     _persist(config, response)
     return response, messages + [response]
 

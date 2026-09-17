@@ -194,10 +194,10 @@ def test_system_prompt_defaults_to_cwd(tmp_path, monkeypatch):
 # --- project_files() module discovery tests ---
 
 
-def _write_config(root, body):
-    config_dir = root / ".xg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "config.json").write_text(body, encoding="utf-8")
+def _write_module(root, body):
+    module_dir = root / ".xg"
+    module_dir.mkdir(parents=True, exist_ok=True)
+    (module_dir / "module.json").write_text(body, encoding="utf-8")
 
 
 @pytest.mark.integration
@@ -206,7 +206,7 @@ def test_project_files_uses_module_allowlist(tmp_path):
     from xg_project.llm._context import project_files
 
     module = tmp_path / "pkg"
-    _write_config(module, '{"files": ["keep.py"]}')
+    _write_module(module, '{"files": ["keep.py"]}')
     (module / "keep.py").write_text("")
     (module / "drop.py").write_text("")
 
@@ -222,7 +222,7 @@ def test_project_files_module_without_files_keeps_subtree(tmp_path):
     from xg_project.llm._context import project_files
 
     module = tmp_path / "pkg"
-    _write_config(module, '{"use_gitignore": false}')
+    _write_module(module, "{}")
     (module / "keep.py").write_text("")
 
     names = {path.name for path in project_files(tmp_path, use_gitignore=False)}
@@ -236,7 +236,7 @@ def test_project_files_empty_allowlist_keeps_nothing(tmp_path):
     from xg_project.llm._context import project_files
 
     module = tmp_path / "pkg"
-    _write_config(module, '{"files": []}')
+    _write_module(module, '{"files": []}')
     (module / "drop.py").write_text("")
 
     names = {path.name for path in project_files(tmp_path, use_gitignore=False)}
@@ -246,13 +246,132 @@ def test_project_files_empty_allowlist_keeps_nothing(tmp_path):
 
 @pytest.mark.integration
 def test_load_context_module_requires_config(tmp_path):
-    """A directory is a module only when .xg/config.json exists."""
+    """A directory is a module only when .xg/module.json exists."""
     from xg_project.llm._context import load_context_module
 
     assert load_context_module(tmp_path) is None
 
-    _write_config(tmp_path, "{}")
+    _write_module(tmp_path, "{}")
 
     module = load_context_module(tmp_path)
     assert module is not None
     assert module.files is None
+
+
+@pytest.mark.integration
+def test_project_files_child_module_starts_fresh(tmp_path):
+    """A nested module without files does not inherit the parent allowlist."""
+    from xg_project.llm._context import project_files
+
+    outer = tmp_path / "pkg"
+    inner = outer / "sub"
+    inner.mkdir(parents=True)
+    _write_module(outer, '{"files": ["keep.py"]}')
+    (outer / "keep.py").write_text("")
+    (outer / "drop.py").write_text("")
+    _write_module(inner, "{}")
+    (inner / "anything.py").write_text("")
+
+    names = {path.name for path in project_files(tmp_path, use_gitignore=False)}
+
+    assert "keep.py" in names
+    assert "drop.py" not in names
+    assert "anything.py" in names
+
+
+@pytest.mark.integration
+def test_model_reads_project_config(tmp_path, monkeypatch):
+    """model() reads the model from .xg/config.json."""
+    import xg_project.config as config_module
+    from xg_project.llm._api import model
+
+    monkeypatch.setattr(
+        config_module, "GLOBAL_CONFIG_PATH", tmp_path / "missing" / "config.json"
+    )
+    config_dir = tmp_path / ".xg"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        '{"model": "@preset/deepseek"}', encoding="utf-8"
+    )
+
+    assert model(tmp_path) == "@preset/deepseek"
+
+
+@pytest.mark.integration
+def test_model_falls_back_to_default(tmp_path, monkeypatch):
+    """model() uses the built-in default when no layer sets one."""
+    import xg_project.config as config_module
+    from xg_project.llm._api import DEFAULT_MODEL, model
+
+    monkeypatch.setattr(
+        config_module, "GLOBAL_CONFIG_PATH", tmp_path / "missing" / "config.json"
+    )
+
+    assert model(tmp_path) == DEFAULT_MODEL
+
+
+# --- provider error translation tests ---
+
+
+def _openrouter_error(status: int, message: str):
+    import httpx
+    from openrouter.errors import OpenRouterError
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(status, text=message, request=request)
+    return OpenRouterError(message, response)
+
+
+class _FailingLLM:
+    """Minimal stand-in that raises a given exception from the model call."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def bind_tools(self, tools):
+        return self
+
+    def stream(self, messages):
+        raise self._exc
+
+    def invoke(self, messages):
+        raise self._exc
+
+
+@pytest.mark.integration
+def test_stream_turn_translates_provider_error(monkeypatch):
+    """stream_turn() turns an OpenRouterError into a ProviderError."""
+    import xg_project.llm as llm_module
+    from xg_project.llm import ProviderError, stream_turn
+
+    exc = _openrouter_error(429, "rate limited")
+    monkeypatch.setattr(llm_module, "get_llm", lambda *a, **k: _FailingLLM(exc))
+
+    with pytest.raises(ProviderError) as info:
+        stream_turn([])
+
+    assert info.value.status_code == 429
+    assert "rate limited" in str(info.value)
+
+
+@pytest.mark.integration
+def test_run_turn_translates_provider_error(monkeypatch):
+    """run_turn() turns an OpenRouterError into a ProviderError."""
+    import xg_project.llm as llm_module
+    from xg_project.llm import ProviderError, run_turn
+
+    exc = _openrouter_error(503, "upstream unavailable")
+    monkeypatch.setattr(llm_module, "get_llm", lambda *a, **k: _FailingLLM(exc))
+
+    with pytest.raises(ProviderError) as info:
+        run_turn([])
+
+    assert info.value.status_code == 503
+
+
+@pytest.mark.integration
+def test_provider_error_is_runtime_error():
+    """ProviderError is a RuntimeError so generic handlers still catch it."""
+    from xg_project.llm import ProviderError
+
+    assert issubclass(ProviderError, RuntimeError)

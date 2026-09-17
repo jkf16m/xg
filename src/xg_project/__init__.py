@@ -11,19 +11,19 @@ from rich.table import Table
 
 def _show_info() -> None:
     """Show how the current working directory becomes LLM context."""
-    from xg_project.config import load_project_config
-    from xg_project.llm._api import MODEL, SYSTEM_FILE, system_prompt
+    from xg_project.config import resolve
+    from xg_project.llm._api import SYSTEM_FILE, model, system_prompt
     from xg_project.llm._context import project_files
     from xg_project.llm._tools import TOOLS
     from xg_project.session import DEFAULT_DB_PATH
 
     root = Path.cwd().resolve()
-    project_config = load_project_config(root)
+    project_config = resolve(root)
     files = project_files(root, use_gitignore=project_config.use_gitignore)
     console = Console()
 
     console.print(f"[bold]root[/bold] {root}")
-    console.print(f"[bold]model[/bold] {MODEL}")
+    console.print(f"[bold]model[/bold] {model(root)}")
     console.print("[bold]provider[/bold] OpenRouter")
     console.print(f"[bold]use_gitignore[/bold] {project_config.use_gitignore}")
     console.print(f"[bold]session database[/bold] {DEFAULT_DB_PATH}")
