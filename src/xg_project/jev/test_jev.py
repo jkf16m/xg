@@ -43,6 +43,8 @@ class _FakeClient:
 def _response(
     kind="edit_feature",
     kind_confidence=0.9,
+    operation="edit",
+    operation_confidence=0.9,
     complexity=2.0,
     complexity_confidence=0.7,
     changes_code=0.95,
@@ -54,6 +56,14 @@ def _response(
                 choice=kind,
                 confidence=kind_confidence,
                 probabilities={kind: kind_confidence, "other": 1 - kind_confidence},
+            ),
+            "operation": ChoiceAnswer(
+                choice=operation,
+                confidence=operation_confidence,
+                probabilities={
+                    operation: operation_confidence,
+                    "edit": 1 - operation_confidence,
+                },
             ),
         },
         scores={
@@ -84,11 +94,13 @@ def test_build_questions_uses_the_right_primitives():
     questions = build_questions()
     assert set(questions) == {
         "request_kind",
+        "operation",
         "complexity",
         "changes_code",
         "is_destructive",
     }
     assert isinstance(questions["request_kind"], Choice)
+    assert isinstance(questions["operation"], Choice)
     assert isinstance(questions["complexity"], Score)
     assert isinstance(questions["changes_code"], Noul)
     assert isinstance(questions["is_destructive"], Noul)
@@ -124,6 +136,7 @@ def test_classify_asks_all_questions_in_one_call():
     assert call["state"] == {"request": "explain how sessions work"}
     assert set(call["questions"]) == {
         "request_kind",
+        "operation",
         "complexity",
         "changes_code",
         "is_destructive",

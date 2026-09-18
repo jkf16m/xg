@@ -14,11 +14,13 @@ def render(result: Classification, *, as_json: bool = False) -> str:
     lines = [
         f"kind        : {result.request_kind.label}  "
         f"({result.request_kind.confidence:.2f}, {result.band.value})",
+        f"operation   : {result.operation.label}  "
+        f"({result.operation.confidence:.2f})",
         f"complexity  : {result.complexity.score:.2f}/{top}  "
         f"({result.complexity.normalized:.2f})",
         f"changes code: {result.changes_code.probability:.2f}",
         f"destructive : {result.is_destructive.probability:.2f}",
     ]
-    if result.needs_clarification:
-        lines.append("low confidence: ask the user to clarify before routing.")
+    if result.needs_reroute:
+        lines.append("reroute: ask the user for a clearer request before routing.")
     return "\n".join(lines)

@@ -1,9 +1,19 @@
 """Request taxonomy for the xg classifier.
 
-The classifier answers one primary ``Choice`` question (``request_kind``) plus
-the signals the router needs to pick a path: how hard the request is
-(``complexity``), whether the repository must be modified at all
-(``changes_code``), and whether the request is risky (``is_destructive``).
+The classifier answers the primary ``Choice`` question (``request_kind``), a
+second one about what fulfilling the request will *do* (``operation``), and the
+signals the router needs: how hard the request is (``complexity``), whether the
+repository must be modified at all (``changes_code``), and whether the request
+is risky (``is_destructive``).
+
+``request_kind`` and ``operation`` are different axes and both are needed. The
+kind says what the user is asking about (a bug, a refactor, a question); the
+operation says what the work will produce (a new file, a change to an existing
+file, or nothing but an answer). A refactor can write a new module.
+
+``command`` is deliberately absent for now: the graph has no command path, so
+offering the label would route requests to a node that does not exist. Requests
+that would have been commands fall to ``other`` and are rerouted to the user.
 
 How far-reaching the request is (*scope*) is deliberately not asked here. It is
 an outcome of the ``local_research`` step, which finds the relevant files; the
@@ -28,7 +38,7 @@ class RequestKind(StrEnum):
     TEST = "test"
     DOCS = "docs"
     CONFIG = "config"
-    COMMAND = "command"
+    CONFUSED = "confused"
     OTHER = "other"
 
 
@@ -71,13 +81,40 @@ REQUEST_KIND_CRITERIA: dict[str, str] = {
         "The user wants project tooling, dependencies, build, packaging, or "
         "settings changed: pyproject, lockfiles, CI, linters, or .xg settings."
     ),
-    "command": (
-        "The user wants a shell command or an operational action performed "
-        "(build, install, run, deploy, git operation) rather than a code edit."
+    "confused": (
+        "The request cannot be understood well enough to act on. Essential "
+        "information is missing (no target, no goal, or an unnamed thing), the "
+        "request contradicts itself, or it is not a request at all: a fragment, "
+        "small talk, or a note to self. Choose this rather than guessing."
     ),
     "other": (
-        "The request does not fit any option above, is too vague to place, or "
-        "spans several kinds with no clear primary."
+        "The request can be understood, but it fits none of the options above, "
+        "or it spans several kinds with no clear primary."
+    ),
+}
+
+
+class Operation(StrEnum):
+    """What fulfilling the request will do to the repository."""
+
+    WRITE = "write"
+    EDIT = "edit"
+    ANSWER = "answer"
+
+
+OPERATION_CRITERIA: dict[str, str] = {
+    "write": (
+        "The deliverable is a file that does not exist yet: the user wants "
+        "something new created. Contrast with edit: there, the file already "
+        "exists and its contents are being changed."
+    ),
+    "edit": (
+        "The deliverable is a change to one or more files that already exist. "
+        "No new file is needed."
+    ),
+    "answer": (
+        "The request is served by reading and explaining. No file is created, "
+        "changed, or deleted."
     ),
 }
 

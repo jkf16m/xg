@@ -18,7 +18,7 @@ Public API
 
 Types:
     Classification, ChoiceOutcome, ScoreOutcome, NoulOutcome
-    RequestKind, ConfidenceBand
+    RequestKind, Operation, ConfidenceBand
     JevError -> a TypeSafe-side failure the caller can retry
 """
 
@@ -39,8 +39,10 @@ from xg_project.jev._taxonomy import (
     COMPLEXITY_LEVELS,
     CONFIDENCE_FLOOR,
     CONFIDENCE_HIGH,
+    OPERATION_CRITERIA,
     REQUEST_KIND_CRITERIA,
     ConfidenceBand,
+    Operation,
     RequestKind,
     band,
 )
@@ -49,12 +51,14 @@ __all__ = [
     "COMPLEXITY_LEVELS",
     "CONFIDENCE_FLOOR",
     "CONFIDENCE_HIGH",
+    "OPERATION_CRITERIA",
     "REQUEST_KIND_CRITERIA",
     "ChoiceOutcome",
     "Classification",
     "ConfidenceBand",
     "JevError",
     "NoulOutcome",
+    "Operation",
     "RequestKind",
     "ScoreOutcome",
     "State",
