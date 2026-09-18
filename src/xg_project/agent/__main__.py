@@ -36,6 +36,10 @@ def _emit(state: AgentState, *, as_json: bool) -> None:
         payload["relevant_files"] = files
         if research is not None:
             payload["candidate_count"] = research.candidates
+            payload["listed_count"] = research.listed
+            payload["content_bytes"] = sum(
+                len(text) for text in state.get("file_contents", {}).values()
+            )
             payload["relevance"] = {
                 path: round(probability, 3)
                 for path, probability in research.relevance.items()
@@ -45,9 +49,16 @@ def _emit(state: AgentState, *, as_json: bool) -> None:
     print(render(classification))
     print(f"route       : {route}")
     if research is not None:
-        print(f"files       : {len(files)} of {research.candidates} candidates")
+        print(
+            f"files       : {len(files)} of {research.candidates} candidates "
+            f"({research.listed} tracked)"
+        )
         for path in files:
             print(f"  {research.relevance[path]:.2f}  {path}")
+        carried = sum(
+            len(text) for text in state.get("file_contents", {}).values()
+        )
+        print(f"contents    : {carried} bytes carried in state")
 
 
 def _one(graph: CompiledStateGraph, prompt: str, *, as_json: bool) -> int:

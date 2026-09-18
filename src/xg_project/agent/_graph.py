@@ -66,6 +66,7 @@ def build_graph(
         return {
             "research": result,
             "relevant_files": result.files,
+            "file_contents": result.contents,
             "route": "local_research",
         }
 

@@ -1,9 +1,16 @@
 """local_research — the forced graph step that finds relevant files.
 
-Given a request, it lists the repository, asks Jev one ``Noul`` per candidate
-file ("is this file needed for the request?"), and returns the files whose
-probability clears a threshold. All questions are evaluated in parallel in one
-``system_one`` call.
+Given a request, it lists the repository, loads the full text of each candidate
+file, and puts those contents in the Jev state as a JSON object keyed by path::
+
+    state = {"request": ..., "files": {path: text, ...}}
+
+One ``Noul`` question is then asked per candidate ("is this file needed?"), all
+in one ``system_one`` call, and the files whose probability clears a threshold
+are selected. Selection is decided from file *contents*, not their names.
+
+``Choice`` is single-select — its answer is one label — so multi-file selection
+is expressed as independent ``Noul`` questions, one per file.
 
 Scope is an outcome of this step, not an input to classification: the number of
 files found is how far-reaching the request turned out to be.
@@ -11,7 +18,7 @@ files found is how far-reaching the request turned out to be.
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from typesafe_sdk import Noul, TypeSafeClient, TypeSafeError
@@ -19,7 +26,12 @@ from typesafe_sdk import Noul, TypeSafeClient, TypeSafeError
 from xg_project.jev import JevError
 
 MAX_CANDIDATES = 120
-"""Cap on files asked about in one call; the rest are dropped by the prefilter."""
+"""Cap on files asked about in one call; above this, the prefilter trims."""
+
+MAX_FILE_BYTES = 200_000
+"""Files larger than this are skipped. Lockfiles and generated artifacts are
+large and carry little signal, and one of them can cost more tokens than the
+rest of the repository combined (this repo's ``uv.lock`` is 262 KB)."""
 
 SELECT_THRESHOLD = 0.5
 """Minimum ``Noul`` probability for a file to be selected."""
@@ -37,11 +49,15 @@ class Research:
     request: str
     files: list[str]
     """Selected files, most relevant first."""
-    relevance: dict[str, float]
+    contents: dict[str, str] = field(default_factory=dict)
+    """Full text of the selected files, keyed by relative path."""
+    relevance: dict[str, float] = field(default_factory=dict)
     """Probability per candidate path."""
-    candidates: int
-    """How many files were asked about."""
-    model: str
+    candidates: int = 0
+    """How many files were sent to Jev."""
+    listed: int = 0
+    """How many files the repository listing returned."""
+    model: str = ""
 
 
 def repo_files(root: Path) -> list[str]:
@@ -80,11 +96,11 @@ def _tokens(text: str) -> set[str]:
 
 
 def _prefilter(files: list[str], request: str, limit: int) -> list[str]:
-    """Keep the ``limit`` paths most lexically related to the request.
+    """Trim a large listing to ``limit`` paths by lexical overlap.
 
-    A cheap guard for large repositories: an exact token match on the path is
-    weak evidence, but it is enough to choose which files are worth asking Jev
-    about when the repository is bigger than one call should carry.
+    This only runs when the repository is bigger than one call should carry.
+    With the listing under the limit, every file is sent, so selection is never
+    name-based.
     """
     if len(files) <= limit:
         return files
@@ -93,13 +109,42 @@ def _prefilter(files: list[str], request: str, limit: int) -> list[str]:
     return sorted(ranked[:limit])
 
 
+def _read_text(path: Path) -> str | None:
+    """Read a file as UTF-8 text, or ``None`` when it is binary or unreadable."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
+def _load(
+    root: Path,
+    files: list[str],
+    request: str,
+    limit: int,
+    max_file_bytes: int,
+) -> list[tuple[str, str]]:
+    """Read the full text of each candidate, skipping unreadable and huge files."""
+    loaded: list[tuple[str, str]] = []
+    for relative in _prefilter(files, request, limit):
+        text = _read_text(root / relative)
+        if text is None or len(text.encode("utf-8")) > max_file_bytes:
+            continue
+        loaded.append((relative, text))
+    return loaded
+
+
 def _questions(files: list[str]) -> dict[str, Noul]:
-    """One ``Noul`` per candidate file, all answered in one call."""
+    """One ``Noul`` per candidate file, all answered in one call.
+
+    The file's full text is in the shared state under its path, so the answer
+    is grounded in contents rather than the filename.
+    """
     return {
         f"file_{index}": Noul(
             instructions=(
                 f"Is the repository file {path!r} needed to answer or carry out "
-                "the request?"
+                "the request? Its full text is in the request state under that path."
             ),
             criteria={
                 "true": "The file is likely to be read, changed, or used as evidence.",
@@ -110,6 +155,37 @@ def _questions(files: list[str]) -> dict[str, Noul]:
     }
 
 
+def _collect(
+    request: str,
+    root: Path,
+    max_candidates: int,
+    max_file_bytes: int,
+) -> tuple[int, list[tuple[str, str]]]:
+    """List the repository and load the full text of each candidate."""
+    listed = repo_files(root)
+    return len(listed), _load(root, listed, request, max_candidates, max_file_bytes)
+
+
+def build_research_state(
+    request: str,
+    *,
+    root: Path | None = None,
+    max_candidates: int = MAX_CANDIDATES,
+    max_file_bytes: int = MAX_FILE_BYTES,
+) -> dict[str, object]:
+    """The exact Jev state sent by :func:`local_research`.
+
+    ``{"request": ..., "files": {path: full text, ...}}`` — the file map is a
+    JSON object keyed by path, and the SDK escapes the text when serializing.
+    Exposed so the state can be inspected without sending it.
+    """
+    if not request.strip():
+        raise ValueError("request must not be empty")
+    root = (root or Path.cwd()).resolve()
+    _, candidates = _collect(request, root, max_candidates, max_file_bytes)
+    return {"request": request, "files": dict(candidates)}
+
+
 def local_research(
     request: str,
     *,
@@ -118,27 +194,30 @@ def local_research(
     root: Path | None = None,
     threshold: float = SELECT_THRESHOLD,
     max_candidates: int = MAX_CANDIDATES,
+    max_file_bytes: int = MAX_FILE_BYTES,
 ) -> Research:
     """Find the files relevant to ``request`` with one Jev call."""
     if not request.strip():
         raise ValueError("request must not be empty")
 
     root = (root or Path.cwd()).resolve()
-    files = _prefilter(repo_files(root), request, max_candidates)
-    if not files:
-        return Research(request=request, files=[], relevance={}, candidates=0, model="")
+    listed, candidates = _collect(request, root, max_candidates, max_file_bytes)
+    if not candidates:
+        return Research(request=request, listed=listed)
 
-    state: dict[str, object] = {"request": request, "repository": files}
+    paths = [path for path, _ in candidates]
+    contents = dict(candidates)
+    state: dict[str, object] = {"request": request, "files": contents}
     try:
         response = client.system_one(
-            state=state, questions=_questions(files), model=model
+            state=state, questions=_questions(paths), model=model
         )
     except TypeSafeError as exc:
         raise JevError(str(exc)) from exc
 
     relevance = {
         path: response.nouls[f"file_{index}"].noul
-        for index, path in enumerate(files)
+        for index, path in enumerate(paths)
     }
     selected = sorted(
         (path for path, probability in relevance.items() if probability >= threshold),
@@ -148,7 +227,9 @@ def local_research(
     return Research(
         request=request,
         files=selected,
+        contents={path: contents[path] for path in selected},
         relevance=relevance,
-        candidates=len(files),
+        candidates=len(paths),
+        listed=listed,
         model=response.model,
     )
