@@ -1,12 +1,13 @@
-"""Classify prompts with TypeSafe Jev — the first filter.
+"""Classify prompts with TypeSafe Jev — the raw first filter.
 
-One prompt in, one classification out:
+One prompt in, one classification out. This is the filter on its own; the
+``xg`` command runs it inside the agent graph, which also routes the result.
 
-    xg "add retry to the http client"
+    python -m xg_project.jev "add retry to the http client"
 
 Omit the prompt to type them one per line, with the client reused:
 
-    xg
+    python -m xg_project.jev
 
 The API key comes from ``TYPESAFE_API_KEY`` or ``pass show jev``. The model
 comes from ``--model`` or the composed ``.xg/config.json`` (``jev_model``),
@@ -14,47 +15,23 @@ falling back to the SDK default (``jev-latest``).
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient, TypeSafeError
 
 from xg_project.config import resolve
-from xg_project.jev import Classification, JevError, build_client, classify
+from xg_project.jev import JevError, build_client, classify
+from xg_project.jev._render import render
 
 
 def _model_from_config() -> str | None:
     return resolve(Path.cwd()).jev_model
 
 
-def _render(result: Classification, *, as_json: bool) -> None:
-    if as_json:
-        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
-        return
-    top = result.complexity.levels - 1
-    print(
-        f"kind        : {result.request_kind.label}  "
-        f"({result.request_kind.confidence:.2f}, {result.band.value})"
-    )
-    print(f"scope       : {result.scope.label}  ({result.scope.confidence:.2f})")
-    print(
-        f"complexity  : {result.complexity.score:.2f}/{top}  "
-        f"({result.complexity.normalized:.2f})"
-    )
-    print(f"changes code: {result.changes_code.probability:.2f}")
-    print(f"destructive : {result.is_destructive.probability:.2f}")
-    if result.needs_clarification:
-        print("-> low confidence: ask the user to clarify before routing.")
-    elif result.is_change:
-        print(f"-> route to file selection ({result.scope.label}).")
-    else:
-        print("-> no repository change requested.")
-
-
 def _one(prompt: str, client: TypeSafeClient, model: str | None, as_json: bool) -> int:
     try:
-        _render(classify(prompt, client=client, model=model), as_json=as_json)
+        print(render(classify(prompt, client=client, model=model), as_json=as_json))
     except (JevError, ValueError) as exc:
         print(f"classification failed: {exc}", file=sys.stderr)
         return 1
@@ -76,8 +53,8 @@ def _loop(client: TypeSafeClient, model: str | None, as_json: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="xg",
-        description="Classify a prompt with TypeSafe Jev.",
+        prog="python -m xg_project.jev",
+        description="Classify a prompt with TypeSafe Jev (the first filter).",
     )
     parser.add_argument(
         "prompt",

@@ -1,8 +1,8 @@
 """Command-line entry point for xg.
 
-The agent is being rebuilt on LangGraph with TypeSafe Jev for decisions. The
-first stage is wired up: ``xg`` takes a prompt and returns the request
-classification. Omit the prompt to classify prompts from stdin in a loop.
+The agent is being rebuilt on LangGraph with TypeSafe Jev for decisions.
+``xg`` runs the agent graph: the Jev first filter classifies the prompt, then
+the router sends it to a downstream node.
 
     xg "add retry to the http client"
     xg
@@ -10,10 +10,10 @@ classification. Omit the prompt to classify prompts from stdin in a loop.
 
 
 def main() -> int:
-    """Run the xg entry point. Currently the first filter."""
-    from xg_project.jev.__main__ import main as first_filter
+    """Run the xg agent graph."""
+    from xg_project.agent.__main__ import main as agent_main
 
-    return first_filter()
+    return agent_main()
 
 
 if __name__ == "__main__":
