@@ -36,6 +36,7 @@ class Config:
     session_path: Path | None = None
     use_gitignore: bool = True
     model: str | None = None
+    jev_model: str | None = None
     patch_formatter: str | None = None
 
 
@@ -75,11 +76,17 @@ def _settings_from_data(data: dict[str, object], source: str) -> Config:
     model = data.get("model")
     if model is not None and not isinstance(model, str):
         raise ValueError(f"{source}: model must be a string")
+    jev_model = data.get("jev_model")
+    if jev_model is not None and not isinstance(jev_model, str):
+        raise ValueError(f"{source}: jev_model must be a string")
     patch_formatter = data.get("patch_formatter")
     if patch_formatter is not None and not isinstance(patch_formatter, str):
         raise ValueError(f"{source}: patch_formatter must be a string")
     return Config(
-        use_gitignore=use_gitignore, model=model, patch_formatter=patch_formatter
+        use_gitignore=use_gitignore,
+        model=model,
+        jev_model=jev_model,
+        patch_formatter=patch_formatter,
     )
 
 
