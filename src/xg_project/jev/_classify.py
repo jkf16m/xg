@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from typesafe_sdk import Choice, Noul, Score, TypeSafeClient, TypeSafeError
 
+from xg_project.jev._client import build_client
 from xg_project.jev._taxonomy import (
     COMPLEXITY_LEVELS,
     CONFIDENCE_FLOOR,
@@ -197,8 +198,7 @@ def classify(
         return _run(client, state, model)
 
     try:
-        owned = TypeSafeClient(model=model) if model else TypeSafeClient()
-        with owned:
+        with build_client(model) as owned:
             return _run(owned, state, model)
     except TypeSafeError as exc:
         raise JevError(str(exc)) from exc

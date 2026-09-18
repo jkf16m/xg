@@ -32,6 +32,7 @@ from xg_project.jev._classify import (
     build_state,
     classify,
 )
+from xg_project.jev._client import build_client, get_api_key
 from xg_project.jev._taxonomy import (
     COMPLEXITY_LEVELS,
     CONFIDENCE_FLOOR,
@@ -60,7 +61,9 @@ __all__ = [
     "ScoreOutcome",
     "State",
     "band",
+    "build_client",
     "build_questions",
     "build_state",
     "classify",
+    "get_api_key",
 ]
