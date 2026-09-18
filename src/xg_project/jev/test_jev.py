@@ -13,11 +13,9 @@ from xg_project.jev import (
     CONFIDENCE_FLOOR,
     CONFIDENCE_HIGH,
     REQUEST_KIND_CRITERIA,
-    SCOPE_CRITERIA,
     Classification,
     ConfidenceBand,
     RequestKind,
-    Scope,
     band,
     build_questions,
     classify,
@@ -45,8 +43,6 @@ class _FakeClient:
 def _response(
     kind="edit_feature",
     kind_confidence=0.9,
-    scope="module",
-    scope_confidence=0.8,
     complexity=2.0,
     complexity_confidence=0.7,
     changes_code=0.95,
@@ -58,11 +54,6 @@ def _response(
                 choice=kind,
                 confidence=kind_confidence,
                 probabilities={kind: kind_confidence, "other": 1 - kind_confidence},
-            ),
-            "scope": ChoiceAnswer(
-                choice=scope,
-                confidence=scope_confidence,
-                probabilities={scope: scope_confidence, "unclear": 1 - scope_confidence},
             ),
         },
         scores={
@@ -86,7 +77,6 @@ def _response(
 def test_taxonomy_criteria_cover_every_option():
     assert set(REQUEST_KIND_CRITERIA) == {kind.value for kind in RequestKind}
     assert "other" in REQUEST_KIND_CRITERIA
-    assert set(SCOPE_CRITERIA) == {scope.value for scope in Scope}
     assert 2 <= len(COMPLEXITY_LEVELS) <= 10
 
 
@@ -94,13 +84,11 @@ def test_build_questions_uses_the_right_primitives():
     questions = build_questions()
     assert set(questions) == {
         "request_kind",
-        "scope",
         "complexity",
         "changes_code",
         "is_destructive",
     }
     assert isinstance(questions["request_kind"], Choice)
-    assert isinstance(questions["scope"], Choice)
     assert isinstance(questions["complexity"], Score)
     assert isinstance(questions["changes_code"], Noul)
     assert isinstance(questions["is_destructive"], Noul)
@@ -115,9 +103,10 @@ def test_classify_maps_typed_answers():
     assert result.kind is RequestKind.EDIT_FEATURE
     assert result.request_kind.label == "edit_feature"
     assert result.request_kind.confidence == pytest.approx(0.9)
-    assert result.scope.label == "module"
     assert result.complexity.score == pytest.approx(2.0)
-    assert result.complexity.normalized == pytest.approx(2.0 / (len(COMPLEXITY_LEVELS) - 1))
+    assert result.complexity.normalized == pytest.approx(
+        2.0 / (len(COMPLEXITY_LEVELS) - 1)
+    )
     assert result.changes_code.yes
     assert not result.is_destructive.yes
     assert result.is_change
@@ -135,7 +124,6 @@ def test_classify_asks_all_questions_in_one_call():
     assert call["state"] == {"request": "explain how sessions work"}
     assert set(call["questions"]) == {
         "request_kind",
-        "scope",
         "complexity",
         "changes_code",
         "is_destructive",

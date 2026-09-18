@@ -28,13 +28,26 @@ def _model_from_config() -> str | None:
 def _emit(state: AgentState, *, as_json: bool) -> None:
     classification = state["classification"]
     route = state.get("route")
+    research = state.get("research")
+    files = state.get("relevant_files", [])
     if as_json:
         payload = dict(classification.to_dict())
         payload["route"] = route
+        payload["relevant_files"] = files
+        if research is not None:
+            payload["candidate_count"] = research.candidates
+            payload["relevance"] = {
+                path: round(probability, 3)
+                for path, probability in research.relevance.items()
+            }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
     print(render(classification))
     print(f"route       : {route}")
+    if research is not None:
+        print(f"files       : {len(files)} of {research.candidates} candidates")
+        for path in files:
+            print(f"  {research.relevance[path]:.2f}  {path}")
 
 
 def _one(graph: CompiledStateGraph, prompt: str, *, as_json: bool) -> int:

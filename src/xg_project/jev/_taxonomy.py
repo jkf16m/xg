@@ -1,10 +1,13 @@
 """Request taxonomy for the xg classifier.
 
 The classifier answers one primary ``Choice`` question (``request_kind``) plus
-the signals the router needs to pick a path: how wide the change is
-(``scope``), how hard it is (``complexity``), whether the repository must be
-modified at all (``changes_code``), and whether the request is risky
-(``is_destructive``).
+the signals the router needs to pick a path: how hard the request is
+(``complexity``), whether the repository must be modified at all
+(``changes_code``), and whether the request is risky (``is_destructive``).
+
+How far-reaching the request is (*scope*) is deliberately not asked here. It is
+an outcome of the ``local_research`` step, which finds the relevant files; the
+number of files it finds is the scope.
 
 Criteria text is the model's only input for these decisions, so each option
 says what it *is* and, where two options are easy to confuse, what belongs to
@@ -75,28 +78,6 @@ REQUEST_KIND_CRITERIA: dict[str, str] = {
     "other": (
         "The request does not fit any option above, is too vague to place, or "
         "spans several kinds with no clear primary."
-    ),
-}
-
-
-class Scope(StrEnum):
-    """How much of the repository the request is expected to touch."""
-
-    SINGLE_FILE = "single_file"
-    FEW_FILES = "few_files"
-    MODULE = "module"
-    REPO_WIDE = "repo_wide"
-    UNCLEAR = "unclear"
-
-
-SCOPE_CRITERIA: dict[str, str] = {
-    "single_file": "One file, or one file plus its test, needs to change.",
-    "few_files": "A handful of files in one area or one package need to change.",
-    "module": "A whole module or subsystem needs to change, or several packages.",
-    "repo_wide": "The change is repository-wide or spans unrelated subsystems.",
-    "unclear": (
-        "The request does not say enough to estimate how far-reaching the "
-        "change is, or no change is needed."
     ),
 }
 

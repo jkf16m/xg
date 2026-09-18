@@ -5,8 +5,10 @@ router needs, in parallel (see https://docs.typesafe.ai/primitives). The result
 is a typed :class:`Classification`, not prose.
 
 Jev never generates the reply or the tool calls. This module only decides what
-kind of request arrived, how wide and hard it is, and whether it is risky, so
-the router can choose a path before any generative model runs.
+kind of request arrived, how hard it is, whether the repository must change,
+and whether it is risky, so the router can choose a path before any generative
+model runs. How far-reaching the request is (*scope*) is not decided here; the
+``local_research`` step decides it by finding the relevant files.
 """
 
 from collections.abc import Mapping
@@ -19,7 +21,6 @@ from xg_project.jev._taxonomy import (
     COMPLEXITY_LEVELS,
     CONFIDENCE_FLOOR,
     REQUEST_KIND_CRITERIA,
-    SCOPE_CRITERIA,
     ConfidenceBand,
     RequestKind,
     band,
@@ -73,7 +74,6 @@ class Classification:
     """Everything the router learned about one request in a single call."""
 
     request_kind: ChoiceOutcome
-    scope: ChoiceOutcome
     complexity: ScoreOutcome
     changes_code: NoulOutcome
     is_destructive: NoulOutcome
@@ -109,8 +109,6 @@ class Classification:
             "kind_confidence": self.request_kind.confidence,
             "kind_band": self.band.value,
             "kind_probabilities": dict(self.request_kind.probabilities),
-            "scope": self.scope.label,
-            "scope_confidence": self.scope.confidence,
             "complexity": self.complexity.score,
             "complexity_normalized": self.complexity.normalized,
             "complexity_confidence": self.complexity.confidence,
@@ -131,13 +129,6 @@ def build_questions() -> dict[str, Choice | Noul | Score]:
                 "and asks for a change, pick the change."
             ),
             criteria=REQUEST_KIND_CRITERIA,
-        ),
-        "scope": Choice(
-            instructions=(
-                "How much of the repository will fulfilling this request touch? "
-                "Estimate from what the request says."
-            ),
-            criteria=SCOPE_CRITERIA,
         ),
         "complexity": Score(
             instructions="How complex is fulfilling this request overall?",
@@ -187,8 +178,9 @@ def classify(
     """Classify one request with Jev.
 
     ``client`` lets a caller reuse a connection; when omitted, one is built
-    (from ``TYPESAFE_API_KEY``) and closed. ``model`` overrides the SDK default
-    (``jev-latest``) and applies only to a client this call builds.
+    (from ``TYPESAFE_API_KEY`` or ``pass show jev``) and closed. ``model``
+    overrides the SDK default (``jev-latest``) and applies only to a client
+    this call builds.
     """
     if not request.strip():
         raise ValueError("request must not be empty")
@@ -216,18 +208,12 @@ def _run(
         raise JevError(str(exc)) from exc
 
     kind = response.choices["request_kind"]
-    scope = response.choices["scope"]
     complexity = response.scores["complexity"]
     return Classification(
         request_kind=ChoiceOutcome(
             label=kind.choice,
             confidence=kind.confidence,
             probabilities=dict(kind.probabilities),
-        ),
-        scope=ChoiceOutcome(
-            label=scope.choice,
-            confidence=scope.confidence,
-            probabilities=dict(scope.probabilities),
         ),
         complexity=ScoreOutcome(
             score=complexity.score,
