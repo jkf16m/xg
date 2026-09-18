@@ -2,11 +2,11 @@
 
 One prompt in, one classification out:
 
-    uv run python -m xg_project.jev "add retry to the http client"
+    xg "add retry to the http client"
 
 Omit the prompt to type them one per line, with the client reused:
 
-    uv run python -m xg_project.jev
+    xg
 
 The API key comes from ``TYPESAFE_API_KEY`` or ``pass show jev``. The model
 comes from ``--model`` or the composed ``.xg/config.json`` (``jev_model``),
@@ -76,7 +76,7 @@ def _loop(client: TypeSafeClient, model: str | None, as_json: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m xg_project.jev",
+        prog="xg",
         description="Classify a prompt with TypeSafe Jev.",
     )
     parser.add_argument(
