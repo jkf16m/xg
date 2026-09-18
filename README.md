@@ -2,6 +2,14 @@
 
 An AI coding agent harness for a 1:1 human-guided loop.
 
+> **Rebuild in progress** — branch `refactor/jev-langgraph`.
+>
+> The previous implementation (LLM turns, tools, SQLite persistence, REPL) has
+> been removed, leaving public-API stubs that raise `NotImplementedError`. The
+> agent is being rebuilt on LangGraph with the TypeSafe Jev SDK. The sections
+> below describe the *previous* design and are not current behavior. See
+> `git log master` for the removed implementation.
+
 `xg` is a terminal REPL that drives a model against your current project. It
 loads the project as context, streams a reply, and proposes tool calls for you
 to approve before anything runs. Conversations persist to a local SQLite
