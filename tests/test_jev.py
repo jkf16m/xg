@@ -436,3 +436,72 @@ def test_explain_reports_the_kept_count_against_the_whole() -> None:
     selection = Selection(files={"a": ""}, scores={"a": 0.9, "b": 0.1})
     assert "kept 1 of 2" in selection.explain()
     assert Selection(problem="boom").explain() == "boom"
+
+
+# -- batching: one request per input budget --------------------------------
+
+
+class EchoClient:
+    """Answers every question with a fixed probability and records each request."""
+
+    def __init__(self, *, score: float = 0.9, fail_on: int | None = None) -> None:
+        self.score = score
+        self.fail_on = fail_on
+        self.calls: list[dict] = []
+
+    async def system_one(self, *, state, questions):
+        self.calls.append({"state": state, "questions": questions})
+        if self.fail_on is not None and len(self.calls) == self.fail_on:
+            raise TypeSafeAPIError(400, {"error": "boom"}, httpx2.Headers())
+        return SystemOneResponse(
+            model="jev-latest",
+            usage=Usage(),
+            answers={path: NoulAnswer(noul=self.score) for path in questions},
+        )
+
+    async def aclose(self) -> None:
+        pass
+
+
+BIG = {f"f{index}.py": "x" * 500 for index in range(10)}
+
+
+async def test_a_file_set_larger_than_the_budget_is_split_across_requests() -> None:
+    client = EchoClient()
+    await Jev(client=client).select(files=BIG, prompt="q", batch_bytes=1500)
+    assert len(client.calls) > 1
+    covered = {path for call in client.calls for path in call["state"]}
+    assert covered == set(BIG)
+
+
+async def test_every_file_is_scored_whichever_batch_it_landed_in() -> None:
+    client = EchoClient()
+    selection = await Jev(client=client).select(files=BIG, prompt="q", batch_bytes=1500)
+    assert set(selection.scores) == set(BIG)
+    assert set(selection.files) == set(BIG)
+    assert selection.requests == len(client.calls)
+
+
+async def test_a_file_larger_than_the_budget_is_sent_alone_rather_than_cut() -> None:
+    files = {"huge.py": "x" * 5000, "small.py": "y"}
+    client = EchoClient()
+    selection = await Jev(client=client).select(files=files, prompt="q", batch_bytes=100)
+    assert client.calls[0]["state"] == {"huge.py": "x" * 5000}
+    assert selection.files["huge.py"] == "x" * 5000
+
+
+async def test_one_failed_batch_does_not_lose_the_others() -> None:
+    client = EchoClient(fail_on=1)
+    selection = await Jev(client=client).select(files=BIG, prompt="q", batch_bytes=1500)
+    assert not selection.ok
+    assert "Jev rejected the request" in (selection.problem or "")
+    # The failed batch's files were never scored, so they are dropped; the rest
+    # are kept, which is the whole point of reporting rather than raising.
+    assert 0 < len(selection.files) < len(BIG)
+
+
+async def test_a_single_request_is_the_common_case() -> None:
+    client = EchoClient()
+    selection = await Jev(client=client).select(files=FILES, prompt="q")
+    assert selection.requests == 1
+    assert len(client.calls) == 1

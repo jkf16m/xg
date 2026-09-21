@@ -26,7 +26,7 @@ class StubJev:
         self.keep = set(keep)
         self.calls: list[dict] = []
 
-    async def select(self, *, files, prompt, threshold=RELEVANCE_THRESHOLD):
+    async def select(self, *, files, prompt, threshold=RELEVANCE_THRESHOLD, batch_bytes=None):
         self.calls.append({"files": sorted(files), "prompt": prompt, "threshold": threshold})
         selected = {path: content for path, content in files.items() if path in self.keep}
         scores = {path: (0.9 if path in self.keep else 0.1) for path in files}

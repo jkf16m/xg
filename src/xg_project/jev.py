@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from typesafe_sdk import (
@@ -137,6 +137,17 @@ positive costs context and money on every later step, and the threshold is where
 that trade is made.
 """
 
+DEFAULT_SELECT_BATCH_BYTES = 24_000
+"""How much file content one relevance request may carry.
+
+Every file's contents go into the state, so a whole tree in one request is tens
+of thousands of tokens and the API rejects it outright. The work is therefore
+split across several requests with the same questions, each within the input
+budget. The number is in characters rather than tokens because the client has no
+tokenizer; roughly four characters to the token puts a batch near six thousand
+input tokens.
+"""
+
 
 @dataclass(frozen=True)
 class Selection:
@@ -152,6 +163,8 @@ difference is what a threshold is chosen against.
     scores: Mapping[str, float] = field(default_factory=dict)
     model: str | None = None
     threshold: float = RELEVANCE_THRESHOLD
+    requests: int = 0
+    """How many API requests the selection took, since the file set is batched."""
     problem: str | None = None
 
     @property
@@ -178,6 +191,27 @@ def build_state_from(files: Mapping[str, str]) -> dict[str, str]:
     question per file.
     """
     return dict(files)
+
+
+def _batches(files: Mapping[str, str], budget: int) -> Iterator[dict[str, str]]:
+    """Split a file map into requests that fit the model's input budget.
+
+    Greedy and in the map's own order, which is by path, so the split is the same
+    on every run. A file larger than the budget forms a request by itself rather
+    than being cut: what a truncated file would say about its own relevance is
+    not something this layer can decide.
+    """
+    batch: dict[str, str] = {}
+    size = 0
+    for path, content in files.items():
+        cost = len(path) + len(content)
+        if batch and size + cost > budget:
+            yield batch
+            batch, size = {}, 0
+        batch[path] = content
+        size += cost
+    if batch:
+        yield batch
 
 
 @dataclass(frozen=True)
@@ -318,58 +352,70 @@ class Jev:
         files: Mapping[str, str],
         prompt: str,
         threshold: float = RELEVANCE_THRESHOLD,
+        batch_bytes: int = DEFAULT_SELECT_BATCH_BYTES,
     ) -> Selection:
-        """Ask, once per file, whether that file is relevant to ``prompt``.
+        """Ask, in batches, whether each file is relevant to ``prompt``.
 
-        One request carries every question: the state is the path -> content map
-        and each question is named after the path it asks about, so a project of
-        any size costs one round trip rather than one per file.
+        A request carries one ``Noul`` question per file it covers, named by the
+        file's path, with the file contents as the state. The file set is split
+        across as many requests as the input budget requires; the questions are
+        identical, only the batch differs.
 
-        A file Jev did not answer for scores zero and is dropped. That is the
-        safe direction: an unanswered file is one whose relevance is unknown, and
+        A file in a batch that failed, or one Jev did not answer for, scores zero
+        and is dropped. That is the safe direction: its relevance is unknown, and
         passing it on would put content into the context that nothing vouched
         for.
         """
         if not files:
             return Selection(problem="there are no files to consider", threshold=threshold)
 
-        questions = {
-            path: Noul(
-                instructions=SELECT_INSTRUCTIONS.format(request=prompt),
-                criteria=SELECT_CRITERIA,
-            )
-            for path in files
-        }
+        scores: dict[str, float] = {}
+        problems: list[str] = []
+        model: str | None = None
+        requests = 0
 
-        try:
-            client = self._connection()
-            response = await client.system_one(
-                state=build_state_from(files),
-                questions=questions,
-            )
-        except TypeSafeAPIConnectionError as error:
-            return Selection(problem=f"could not reach Jev: {error}", threshold=threshold)
-        except TypeSafeAPIError as error:
-            return Selection(problem=f"Jev rejected the request: {error}", threshold=threshold)
-        except TypeSafeError as error:
-            return Selection(problem=f"Jev is not configured: {error}", threshold=threshold)
+        for batch in _batches(files, batch_bytes):
+            questions = {
+                path: Noul(
+                    instructions=SELECT_INSTRUCTIONS.format(request=prompt),
+                    criteria=SELECT_CRITERIA,
+                )
+                for path in batch
+            }
+            requests += 1
+            try:
+                client = self._connection()
+                response = await client.system_one(
+                    state=build_state_from(batch),
+                    questions=questions,
+                )
+            except TypeSafeAPIConnectionError as error:
+                problems.append(f"could not reach Jev: {error}")
+                continue
+            except TypeSafeAPIError as error:
+                problems.append(f"Jev rejected the request: {error}")
+                continue
+            except TypeSafeError as error:
+                problems.append(f"Jev is not configured: {error}")
+                continue
 
-        # Every file gets a score, so a kept file at 0.86 and an unanswered one
-        # are distinguishable in the result rather than both simply absent.
-        scores = {
-            path: response.nouls[path].noul if path in response.nouls else 0.0
-            for path in files
-        }
+            model = model or response.model
+            for path in batch:
+                answer = response.nouls.get(path)
+                scores[path] = answer.noul if answer is not None else 0.0
+
         kept = {
             path: content
             for path, content in files.items()
-            if scores[path] > threshold
+            if scores.get(path, 0.0) > threshold
         }
         return Selection(
             files=kept,
             scores=scores,
-            model=response.model,
+            model=model,
             threshold=threshold,
+            requests=requests,
+            problem="; ".join(problems) or None,
         )
 
     async def aclose(self) -> None:
