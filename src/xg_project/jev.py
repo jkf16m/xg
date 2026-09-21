@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from typesafe_sdk import (
     AsyncTypeSafeClient,
     Choice,
+    Noul,
+    NoulCriteria,
     TypeSafeAPIError,
     TypeSafeAPIConnectionError,
     TypeSafeError,
@@ -47,9 +49,14 @@ that exports a key is never second-guessed by the password store."""
 PASS_ENTRY = "jev"
 """The `pass` entry holding the key, as ``pass show jev`` on the command line."""
 
-PASS_TIMEOUT = 10.0
-"""Seconds to wait for `pass`. It can block on a gpg passphrase prompt, and a
-routing decision must not hang the session waiting for one."""
+PASS_TIMEOUT = 30.0
+"""Seconds to wait for `pass`.
+
+A cold gpg-agent pops a pinentry dialog and waits for a human, which takes
+longer than a network call and longer than a person expects a key lookup to
+take. A routing decision must not hang the session forever, so there is a
+bound — but it is set for a person typing a passphrase, not for a warm cache.
+"""
 
 
 def api_key_from_pass(entry: str = PASS_ENTRY) -> str | None:
@@ -101,6 +108,76 @@ If more than one option looks plausible, choose the one that is the closest
 others to make sense. If the request does not match any option's description,
 choose the option that is the least wrong and answer with low confidence.
 """
+
+
+SELECT_INSTRUCTIONS = """\
+The user asked: {request}
+
+The state above is a JSON object whose keys are file paths and whose values are
+the full contents of those files. Each question is named after one of those
+paths. Answer yes when that file's contents are relevant to the user's request,
+and no when they are not.
+
+Judge only the file named by its question. A file that merely lives in the same
+project is not relevant. A file that would have to be read to answer the request
+is.
+"""
+
+SELECT_CRITERIA = NoulCriteria(
+    true="the file is relevant to the request",
+    false="the file is not relevant to the request",
+)
+
+RELEVANCE_THRESHOLD = 0.85
+"""The probability above which a file counts as relevant.
+
+Below this a file is dropped from the context rather than passed on with a
+caveat. A false negative costs an answer that is missing a file; a false
+positive costs context and money on every later step, and the threshold is where
+that trade is made.
+"""
+
+
+@dataclass(frozen=True)
+class Selection:
+    """Which files Jev judged relevant to a request, or why it could not say.
+
+    ``files`` is the kept subset, ``scores`` is every file's probability, kept or
+    not. The scores are retained because a dropped file at 0.84 and a dropped
+    file at 0.02 look identical if only the survivors are returned, and that
+difference is what a threshold is chosen against.
+    """
+
+    files: Mapping[str, str] = field(default_factory=dict)
+    scores: Mapping[str, float] = field(default_factory=dict)
+    model: str | None = None
+    threshold: float = RELEVANCE_THRESHOLD
+    problem: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Whether Jev produced a selection."""
+        return self.problem is None
+
+    def explain(self) -> str:
+        """A one-line account of the selection, for the log."""
+        if self.problem is not None:
+            return self.problem
+        return (
+            f"kept {len(self.files)} of {len(self.scores)} files "
+            f"above {self.threshold:.2f}"
+        )
+
+
+def build_state_from(files: Mapping[str, str]) -> dict[str, str]:
+    """The state parameter for a relevance question: path -> content.
+
+    A named function rather than a ``dict(files)`` inline, because this is the
+    one place the wire shape of the selection state is written down. The keys
+    are the question names as well, which is what lets one request carry one
+    question per file.
+    """
+    return dict(files)
 
 
 @dataclass(frozen=True)
@@ -233,6 +310,66 @@ class Jev:
             confidence=answer.confidence,
             probabilities=dict(answer.probabilities),
             model=response.model,
+        )
+
+    async def select(
+        self,
+        *,
+        files: Mapping[str, str],
+        prompt: str,
+        threshold: float = RELEVANCE_THRESHOLD,
+    ) -> Selection:
+        """Ask, once per file, whether that file is relevant to ``prompt``.
+
+        One request carries every question: the state is the path -> content map
+        and each question is named after the path it asks about, so a project of
+        any size costs one round trip rather than one per file.
+
+        A file Jev did not answer for scores zero and is dropped. That is the
+        safe direction: an unanswered file is one whose relevance is unknown, and
+        passing it on would put content into the context that nothing vouched
+        for.
+        """
+        if not files:
+            return Selection(problem="there are no files to consider", threshold=threshold)
+
+        questions = {
+            path: Noul(
+                instructions=SELECT_INSTRUCTIONS.format(request=prompt),
+                criteria=SELECT_CRITERIA,
+            )
+            for path in files
+        }
+
+        try:
+            client = self._connection()
+            response = await client.system_one(
+                state=build_state_from(files),
+                questions=questions,
+            )
+        except TypeSafeAPIConnectionError as error:
+            return Selection(problem=f"could not reach Jev: {error}", threshold=threshold)
+        except TypeSafeAPIError as error:
+            return Selection(problem=f"Jev rejected the request: {error}", threshold=threshold)
+        except TypeSafeError as error:
+            return Selection(problem=f"Jev is not configured: {error}", threshold=threshold)
+
+        # Every file gets a score, so a kept file at 0.86 and an unanswered one
+        # are distinguishable in the result rather than both simply absent.
+        scores = {
+            path: response.nouls[path].noul if path in response.nouls else 0.0
+            for path in files
+        }
+        kept = {
+            path: content
+            for path, content in files.items()
+            if scores[path] > threshold
+        }
+        return Selection(
+            files=kept,
+            scores=scores,
+            model=response.model,
+            threshold=threshold,
         )
 
     async def aclose(self) -> None:

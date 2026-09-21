@@ -1,0 +1,22 @@
+# xg's own ignore file, applied after every .gitignore.
+#
+# One pattern per line, in git ignore syntax: a leading "!" re-includes, a
+# leading "/" anchors to this directory, a trailing "/" matches directories
+# only. Because this file is applied last, it wins over .gitignore.
+#
+# .gitignore already covers what git should not track. This file covers what git
+# may track but xg should not read: local material that would be read as project
+# content, and generated files too large to be useful context.
+
+# Local material that must not become model context.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+
+# Generated or vendored files that are expensive and uninformative as context.
+*.min.js
+*.min.css
+*.map

@@ -348,3 +348,91 @@ def test_a_hanging_pass_is_no_key(monkeypatch) -> None:
 
     monkeypatch.setattr("xg_project.jev.subprocess.run", hang)
     assert api_key_from_pass() is None
+
+
+# -- selecting the files worth reading -------------------------------------
+
+
+FILES = {"src/parse.py": "def parse(): ...", "docs/readme.md": "# readme"}
+
+
+def noul_response(scores: dict[str, float]) -> SystemOneResponse:
+    """A real response carrying one Noul answer per file path."""
+    return SystemOneResponse(
+        model="jev-latest",
+        usage=Usage(),
+        answers={path: NoulAnswer(noul=score) for path, score in scores.items()},
+    )
+
+
+async def select_files(client: object, **overrides):
+    kwargs = {"files": FILES, "prompt": "where is the parser?"}
+    return await Jev(client=client).select(**{**kwargs, **overrides})
+
+
+async def test_one_noul_question_is_asked_per_file_named_by_its_path() -> None:
+    from typesafe_sdk import Noul
+
+    client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.2}))
+    await select_files(client)
+
+    questions = client.calls[0]["questions"]
+    assert set(questions) == set(FILES)
+    assert all(isinstance(question, Noul) for question in questions.values())
+
+
+async def test_the_selection_state_is_the_file_map_itself() -> None:
+    """Path -> direct content, so the question name is the key into the state."""
+    client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.2}))
+    await select_files(client)
+    assert client.calls[0]["state"] == FILES
+
+
+async def test_files_above_the_threshold_are_kept_and_the_rest_dropped() -> None:
+    client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.4}))
+    selection = await select_files(client)
+    assert selection.ok
+    assert set(selection.files) == {"src/parse.py"}
+    assert selection.files["src/parse.py"] == FILES["src/parse.py"]
+
+
+async def test_the_threshold_is_exclusive() -> None:
+    """More than 0.85: a file exactly at 0.85 is dropped."""
+    client = FakeClient(result=noul_response({"src/parse.py": 0.85, "docs/readme.md": 0.86}))
+    selection = await select_files(client)
+    assert set(selection.files) == {"docs/readme.md"}
+
+
+async def test_every_file_is_scored_even_when_not_answered() -> None:
+    client = FakeClient(result=noul_response({"src/parse.py": 0.9}))
+    selection = await select_files(client)
+    assert set(selection.files) == {"src/parse.py"}
+    assert selection.scores == {"src/parse.py": 0.9, "docs/readme.md": 0.0}
+
+
+async def test_the_threshold_can_be_lowered() -> None:
+    client = FakeClient(result=noul_response({"src/parse.py": 0.5, "docs/readme.md": 0.4}))
+    selection = await select_files(client, threshold=0.45)
+    assert set(selection.files) == {"src/parse.py"}
+    assert selection.threshold == 0.45
+
+
+async def test_a_selection_failure_is_a_problem_not_a_raise() -> None:
+    selection = await select_files(FakeClient(raises=TypeSafeAPIConnectionError("timed out")))
+    assert not selection.ok
+    assert "could not reach Jev" in selection.problem
+
+
+async def test_no_files_is_a_problem_and_costs_no_request() -> None:
+    client = FakeClient(result=noul_response({}))
+    selection = await select_files(client, files={})
+    assert not selection.ok
+    assert client.calls == []
+
+
+def test_explain_reports_the_kept_count_against_the_whole() -> None:
+    from xg_project.jev import Selection
+
+    selection = Selection(files={"a": ""}, scores={"a": 0.9, "b": 0.1})
+    assert "kept 1 of 2" in selection.explain()
+    assert Selection(problem="boom").explain() == "boom"

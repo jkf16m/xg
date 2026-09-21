@@ -29,6 +29,7 @@ and other keys by replacement, exactly as a run would.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 
 from xg_project.graph.langgraph_tree import (
@@ -96,8 +97,36 @@ class Walk:
 
     position: str = ""
     trail: list[str] = field(default_factory=list)
-    goal: str | None = None
-    answer: str | None = None
+    data: dict[str, object] = field(default_factory=dict)
+    """Everything a node contributed that is not the trail: the goal, the files a
+    read collected, the subset a sort kept, the answer. A node's keys are merged
+    in here and handed forward on the next visit, so a linear pipeline like
+    origin -> collect -> sort -> response carries its work between nodes without
+    each node knowing the shape of the whole state."""
+
+    @property
+    def goal(self) -> str | None:
+        """The origin's reading of the request, once the origin has run."""
+        value = self.data.get("goal")
+        return value if isinstance(value, str) else None
+
+    @property
+    def answer(self) -> str | None:
+        """The last generative node's result, if one has run in this position."""
+        value = self.data.get("answer")
+        return value if isinstance(value, str) else None
+
+    @property
+    def files(self) -> dict[str, str]:
+        """Every file the last read collected, path -> content."""
+        value = self.data.get("files")
+        return dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def selected(self) -> dict[str, str]:
+        """The subset the last sort kept."""
+        value = self.data.get("selected")
+        return dict(value) if isinstance(value, dict) else {}
 
     def __post_init__(self) -> None:
         if not self.tree.sealed:
@@ -108,31 +137,22 @@ class Walk:
             self.position = self.tree.entry
 
     async def astep(self, prompt: str) -> Step:
-        """One prompt, one node — carrying the routing to Jev when one is attached.
+        """One prompt, one node, awaiting the node and any Jev routing it needs.
 
-        With no Jev this is exactly :meth:`step`; with one, each decision node's
-        option set is its children and Jev picks among them. A routing that fails
-        is a value, not an exception: the session does not move, and ``reason``
-        carries the sentence. The node's contribution was already merged, so a
-        failed route leaves the context as it stood.
+        This is the general entry point: it awaits an async node function, and at
+        a decision node it asks Jev when one is attached and falls back to the
+        tree's own router when not. :meth:`step` is the synchronous subset, for
+        trees whose nodes are all synchronous.
+
+        A routing that fails is a value, not an exception: the session does not
+        move, and ``reason`` carries the sentence. The node's contribution was
+        already merged, so a failed route leaves the context as it stood.
         """
-        if self.jev is None:
-            return self.step(prompt)
-
         node = self.tree.node(self.position)
-        self.answer = None
-        produced = node.fn(self._state(prompt))
-        self._merge(produced)
+        produced = await self._run(node, prompt)
 
         router = self.tree.router(node.name)
-        plain = self.tree.next_node(node.name)
-
-        if router is None:
-            if plain is None:
-                return self._leaf(node, prompt)
-            target = plain
-            result = str(produced.get("goal") or f"moved to {target}")
-        else:
+        if router is not None and self.jev is not None:
             options = self.options(router)
             routing = await self.jev.decide(
                 current=node.name,
@@ -141,75 +161,86 @@ class Walk:
                 options=options,
             )
             if not routing.ok:
-                return Step(
-                    frm=node.name,
-                    prompt=prompt,
-                    result="",
-                    kind="decision",
-                    to=None,
-                    reason=routing.problem,
-                )
+                return self._stopped(node, prompt, routing.problem)
             target = routing.node
             assert target is not None  # guaranteed by routing.ok
             if target not in options:
-                # Jev.decide already refuses an un-offered label, so this is a
-                # guard on the seam rather than on the model: the walk builds the
-                # option set, and it will not move to anything outside it.
-                return Step(
-                    frm=node.name,
-                    prompt=prompt,
-                    result="",
-                    kind="decision",
-                    to=None,
-                    reason=f"jev chose {target!r}, which was not offered",
-                )
-            result = f"jev chose {routing.explain()}"
+                # Jev.decide already refuses an un-offered label, so this guards
+                # the seam rather than the model: the walk builds the option set,
+                # and it will not move to anything outside it.
+                return self._stopped(node, prompt, f"jev chose {target!r}, which was not offered")
+            return self._moved(node, prompt, target, f"jev chose {routing.explain()}")
 
-        self.position = target
-        return Step(
-            frm=node.name,
-            prompt=prompt,
-            result=result,
-            kind="decision",
-            to=target,
-        )
+        local = self._local_route(node, produced, prompt)
+        if local is None:
+            return self._leaf(node, prompt)
+        target, result = local
+        return self._moved(node, prompt, target, result)
 
     def step(self, prompt: str) -> Step:
         """Run ``prompt`` at the current node and walk at most one node down.
 
-        The node's kind decides what happens, as everywhere else. A decision node
-        contributes and routes, and the walk follows exactly one route; the
-        prompt is not consumed, so the same prompt can be submitted at the next
-        node and be routed again on where the session now stands.
+        The synchronous subset of :meth:`astep`: the node function must return a
+        mapping, not an awaitable, and routing uses the tree's own router rather
+        than Jev. A node that is async raises rather than being silently skipped.
         """
         node = self.tree.node(self.position)
-        # A result belongs to the visit that produced it, so nothing carries over
-        # from a previous node; the leaf reads what its own function wrote.
-        self.answer = None
         produced = node.fn(self._state(prompt))
+        if inspect.isawaitable(produced):
+            # Close it so the coroutine is not left un-awaited; the caller wants
+            # astep, and the error says so.
+            if inspect.iscoroutine(produced):
+                produced.close()
+            raise RuntimeError(
+                f"node {node.name!r} is async; use Walk.astep(), not Walk.step()"
+            )
         self._merge(produced)
 
-        router = self.tree.router(node.name)
-        plain = self.tree.next_node(node.name)
+        local = self._local_route(node, produced, prompt)
+        if local is None:
+            return self._leaf(node, prompt)
+        target, result = local
+        return self._moved(node, prompt, target, result)
 
+    async def _run(self, node, prompt: str) -> dict[str, object]:
+        """Visit a node: run it, await it if needed, merge, and return the delta."""
+        # A result belongs to the visit that produced it, so nothing carries over
+        # from a previous node; a leaf reads what its own function wrote.
+        self.data.pop("answer", None)
+        produced = node.fn(self._state(prompt))
+        if inspect.isawaitable(produced):
+            produced = await produced
+        self._merge(produced)
+        return produced
+
+    def _moved(self, node, prompt: str, target: str, result: str) -> Step:
+        """Record a move and return the step that describes it."""
+        self.position = target
+        return Step(frm=node.name, prompt=prompt, result=result, kind="decision", to=target)
+
+    def _stopped(self, node, prompt: str, reason: str | None) -> Step:
+        """A step that did not move, with the sentence explaining why."""
+        return Step(
+            frm=node.name, prompt=prompt, result="", kind="decision", to=None, reason=reason
+        )
+
+    def _local_route(
+        self, node, produced: dict[str, object], prompt: str
+    ) -> tuple[str, str] | None:
+        """Route without Jev: a router decides, or a plain edge is followed.
+
+        Returns ``(target, result)``, or ``None`` when the node has nowhere to go
+        and is therefore a leaf.
+        """
+        router = self.tree.router(node.name)
         if router is not None:
             key = router.decide(self._state(prompt))
             target = router.routes[key]
-            result = str(produced.get("goal") or f"decided {key!r} -> {target}")
-        elif plain is not None:
-            target = plain
-            result = str(produced.get("goal") or f"moved to {target}")
-        else:
-            return self._leaf(node, prompt)
-
-        self.position = target
-        return Step(
-            frm=node.name,
-            prompt=prompt,
-            result=result,
-            kind="decision",
-            to=target,
-        )
+            return target, str(produced.get("goal") or f"decided {key!r} -> {target}")
+        plain = self.tree.next_node(node.name)
+        if plain is not None:
+            return plain, str(produced.get("goal") or f"moved to {plain}")
+        return None
 
     def back(self) -> Back:
         """Move to the parent node. The only way up, and it is the user's."""
@@ -226,7 +257,7 @@ class Walk:
         # parent we return to has not run in this position, so it must not be.
         if self.trail:
             self.trail.pop()
-        self.answer = None
+        self.data.pop("answer", None)
         self.position = parent
         return Back(frm=frm, to=parent, ok=True)
 
@@ -279,12 +310,14 @@ class Walk:
         )
 
     def _state(self, prompt: str) -> TreeState:
-        """Build the state a node or router is shown, from the session."""
-        state: TreeState = {"prompt": prompt, "trail": list(self.trail)}
-        if self.goal is not None:
-            state["goal"] = self.goal
-        if self.answer is not None:
-            state["answer"] = self.answer
+        """Build the state a node or router is shown, from the session.
+
+        Everything a node contributed earlier is carried forward verbatim, so a
+        node reads ``files`` or ``selected`` the way it would read any other key.
+        """
+        state: TreeState = dict(self.data)  # type: ignore[assignment]
+        state["prompt"] = prompt
+        state["trail"] = list(self.trail)
         return state
 
     def _merge(self, produced: dict[str, object]) -> None:
@@ -297,10 +330,8 @@ class Walk:
         for key, value in produced.items():
             if key == "trail":
                 self.trail.extend(value)  # type: ignore[arg-type]
-            elif key == "goal":
-                self.goal = value  # type: ignore[assignment]
-            elif key == "answer":
-                self.answer = value  # type: ignore[assignment]
+            else:
+                self.data[key] = value
 
 
 def main(argv: list[str] | None = None) -> int:

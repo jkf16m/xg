@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import argparse
 import operator
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Protocol, TypedDict
 
@@ -106,9 +106,26 @@ class TreeState(TypedDict, total=False):
     answer: str
     """The leaf's contribution. In the real system this is where an LLM runs."""
 
+    files: dict[str, str]
+    """Every file a read node collected, path -> content."""
 
-# A node receives the whole state and returns the keys it changed.
-NodeFn = Callable[[TreeState], dict[str, object]]
+    selected: dict[str, str]
+    """The subset a sort node kept, in the same shape as ``files``."""
+
+    scores: dict[str, float]
+    """Every file's relevance probability, kept or not."""
+
+    skipped: list[str]
+    """What a read found but did not read, and why, as one string per file."""
+
+    problem: str
+    """Why a node could not do its job, as a sentence rather than an exception."""
+
+
+# A node receives the whole state and returns the keys it changed. An async node
+# returns an awaitable of the same mapping; LangGraph and `Walk.astep` both await
+# it, and `Walk.step` refuses it rather than pretending to have run it.
+NodeFn = Callable[[TreeState], "dict[str, object] | Awaitable[dict[str, object]]"]
 # A router receives the whole state and returns the key of one registered route.
 DecideFn = Callable[[TreeState], str]
 
