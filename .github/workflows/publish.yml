@@ -1,0 +1,46 @@
+name: publish
+
+# Publishing is a release, not a push. An upload to PyPI cannot be undone: a
+# version number is spent the moment it is accepted, and deleting a release does
+# not give it back. So this runs when a release is published — a deliberate act
+# with a tag attached — and not on every merge.
+on:
+  release:
+    types: [published]
+
+jobs:
+  pypi-publish:
+    name: upload release to PyPI
+    runs-on: ubuntu-latest
+
+    # The environment is what the Trusted Publisher on PyPI was configured
+    # against, so the two have to agree. It is also where a required reviewer or
+    # a tag rule can be attached, which is the reason to name one at all.
+    environment: pypi
+
+    permissions:
+      # Mandatory for Trusted Publishing: without it the job cannot obtain the
+      # OIDC token that PyPI exchanges for a short-lived upload credential.
+      # Granted at the job level rather than the workflow level so no other job
+      # in this file can borrow it.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the distributions
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      # No username, no password, no token: the action asks GitHub for an OIDC
+      # identity, PyPI verifies it names this repository and this workflow, and
+      # returns a credential that lasts for the upload. There is no secret to
+      # store, rotate, or leak.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

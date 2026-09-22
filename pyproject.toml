@@ -70,9 +70,9 @@ dev = [
 ]
 
 [project.urls]
-# Fill these in before the first upload; PyPI shows them on the project page.
-# Repository = "https://github.com/<owner>/xg"
-# Issues = "https://github.com/<owner>/xg/issues"
+Homepage = "https://github.com/jkf16m/xg"
+Repository = "https://github.com/jkf16m/xg"
+Issues = "https://github.com/jkf16m/xg/issues"
 
 [project.scripts]
 xg = "xg_project.__main__:main"
