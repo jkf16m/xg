@@ -7,17 +7,17 @@ generic it is, its kind, and where it was defined. The behaviour hangs off
 `handle` as a plain callable so a declaration stays comparable, printable, and
 testable without running anything.
 
-**Kind is one of two things, and it decides everything else.** A decision node is
-where Jev reads the request and picks the next node, and its contribution is an
-addition to the context window later nodes are handed. A generative node is where
-an LLM is driven and produces the result itself, so it contributes no context and
-receives the prompt directly. `builds_context` is a property of the kind rather
-than a field beside it, so a node cannot claim to be one kind and behave like the
-other.
+**Every node introduces state, and the state is keyed by node.** A handler is
+handed the prompt, the state so far, and the drivers it needs, and returns the
+value it adds under its own name. Nothing is appended to a shared context
+window: a later node reads one earlier node's entry by that node's key, which is
+what makes a workflow a sequence of explicit contributions rather than an
+accumulating transcript.
 
-The one exception is the origin, which is a decision node whose contribution is
-the *goal* rather than a piece of context: it is where the user says what they
-want before any node has been chosen.
+**Kind is one of two things, and it says where the run goes next.** A decision
+node has children and moves to one of them; a generative node is a leaf where a
+model produces the result. Both introduce state; the kind only decides whether
+there is a move afterwards.
 
 **Movement is a policy over levels, not a property of the graph.** The graph is
 bidirectional; what is asymmetric is who may drive a move. ``Actor.JEV`` may
@@ -27,17 +27,59 @@ is one predicate, held in one place, so there is exactly one definition of it.
 Levels are genericity. Level 0 is the origin, the most generic node; deeper
 nodes are more specific. "Up" always means toward the origin, and "down" always
 means away from it.
+
+**Built-in nodes are namespaced.** :func:`xg` prefixes them with ``_XG_``, so a
+user's node never collides with one xg ships, and the rendering makes the
+boundary visible.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-# A node handler receives the submitted prompt and returns the text to show.
-# `command` ignores the context window entirely; later nodes will be handed one.
-Handler = Callable[[str], str]
+if TYPE_CHECKING:  # annotations only, so the registry stays free of the drivers
+    from xg_project.jev import Jev
+    from xg_project.llm import Executor
+
+XG_PREFIX = "_XG_"
+"""Every node the built-in graph ships is named with this prefix.
+
+A node without it came from a user or an extension, which is how a reader tells
+the two apart. The prefix is written once, here, so it cannot drift between the
+default graph and anything that checks for it.
+"""
+
+
+def xg(name: str) -> str:
+    """Name a built-in node. The prefix lives here and nowhere else."""
+    return f"{XG_PREFIX}{name}"
+
+
+@dataclass(frozen=True)
+class NodeInput:
+    """What a node is handed when a prompt arrives.
+
+    A node reads the prompt, the state earlier nodes introduced, and the drivers
+    it needs. ``state`` is the whole accumulated state keyed by node name, so a
+    node reads exactly what a previous node wrote and nothing else.
+    """
+
+    node: str
+    prompt: str
+    state: Mapping[str, object]
+    jev: Jev | None = None
+    executor: Executor | None = None
+    root: str | Path | None = None
+
+
+# A node handler receives a `NodeInput` and returns the value it introduces into
+# the state under its own name. It may be async, because a node is where a model
+# is asked; the turn awaits it.
+Handler = Callable[[NodeInput], "object | Awaitable[object]"]
 
 
 class Actor(StrEnum):
@@ -59,32 +101,36 @@ class UnknownNode(KeyError):
 class NodeKind(StrEnum):
     """What happens when a prompt arrives at a node.
 
-    The distinction is about *who produces the next thing*: Jev picks a
-    destination at a decision node, an LLM produces an answer at a generative
-    one. It is the only thing that varies between nodes; the rest of a node's
-    behaviour follows from it.
+    The distinction is about *where the run goes next*: a decision node has
+    children and moves to one of them, a generative node is a leaf where a model
+    produces the final state. Every node introduces state; the kind says what
+    comes after it.
     """
 
     DECISION = "decision"
-    """Jev routes here. The node contributes to the context window built for the
-    nodes below it, and the user may also traverse it by hand."""
+    """The run moves on from here, to a child Jev chooses (or the only child).
+    The user may also traverse it by hand."""
 
     GENERATIVE = "generative"
-    """An LLM is driven here and produces the result: a response, or a tool call
-    for xg to make."""
+    """A leaf: a model is driven here and produces the result, a response or a
+    tool call for xg to make. There is nowhere below it."""
 
 
 @dataclass(frozen=True)
 class NodeDeclaration:
     """One node: its place in the graph and what it does.
 
-    ``summary`` is not documentation. It is the *only* text Jev sees when
-    choosing between nodes, so it has to say what the node is for in terms a
-    request can be matched against. A vague summary is a routing bug.
+    ``summary`` is a generic description of what the node *does*: the effect it
+    has on a request, not advice to whichever node links to it. A node never
+    tells its parent when to route to it — the router matches a request against
+    the described effects — so the description is the whole contract, and it has
+    to be specific about the node's own behaviour rather than about a workflow it
+    happens to sit in.
 
-    ``handle`` is what the node contributes when a prompt arrives. At a decision
-    node that is an addition to the context window; at a generative node it is
-    the result. ``None`` means the node is graph structure only.
+    ``handle`` is what the node introduces when a prompt arrives: the value stored
+    in the state under this node's name. ``None`` means the node is graph structure
+    only. It may be async, because a node is where a model is asked; the turn
+    awaits it.
 
     ``children`` names the nodes reachable downward from here. It is the
     successor list, so the tree the TUI draws, the ancestor walk that decides
@@ -99,17 +145,21 @@ class NodeDeclaration:
     children: tuple[str, ...] = ()
     handle: Handler | None = None
     origin: str = "builtin"
+    proposes: bool = False
+    """Whether the node's result is a proposal the user must accept or reject
+    before anything happens. Only a generative node may set it, because only a
+    generative node is a leaf a model proposes from."""
 
     def __post_init__(self) -> None:
         if self.level < 0:
             raise ValueError(f"{self.name!r}: level must be >= 0, got {self.level}")
         if not self.summary.strip():
             raise ValueError(f"{self.name!r}: summary must not be empty")
-
-    @property
-    def builds_context(self) -> bool:
-        """Whether nodes below this one are handed what this node contributed."""
-        return self.kind is NodeKind.DECISION
+        if self.proposes and self.kind is not NodeKind.GENERATIVE:
+            raise ValueError(
+                f"{self.name!r}: only a generative node can propose; "
+                f"{self.kind} has no executor"
+            )
 
 
 @dataclass
@@ -206,6 +256,16 @@ class Registry:
                     raise UnknownNode(f"{node.name!r} lists unknown child {child!r}")
                 out[child] = node.name
         return out
+
+    def parent(self, name: str) -> str | None:
+        """The node directly above ``name``, or ``None`` when it is the origin.
+
+        This is what the ``/go ..`` move resolves against. It looks the node up
+        first, so a typo raises :class:`UnknownNode` rather than reading as
+        "already at the origin".
+        """
+        self.get(name)
+        return self.parents().get(name)
 
     def ancestors(self, name: str) -> list[str]:
         """The path from the origin down to ``name``, inclusive.

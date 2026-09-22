@@ -29,12 +29,23 @@ themselves, which are instructions about the read rather than part of it.
 Files that are not UTF-8 text, and files above ``max_bytes``, are recorded in
 ``skipped`` rather than silently vanishing: a caller can tell "ignored" from
 "could not be read".
+
+``read_tree`` can also be bounded by an ``include`` list — gitignore-syntax
+patterns, rooted at ``root``. That is how a context module's declaration becomes
+a hard bound on the read: a file the module does not expose is not merely
+discouraged, it is never opened. The bound composes with the ignores rather than
+replacing them, so ``.xgignore`` still removes a file a module declared.
+
+``.xg`` is xg's own directory. A module manifest says what a folder exposes,
+which is an instruction about the read in the same sense an ignore file is, so
+``read_tree`` never returns one as content; :mod:`xg_project.module` is what
+reads them, and it does so through the same walk.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +54,8 @@ import pathspec
 GITIGNORE = ".gitignore"
 XGIGNORE = ".xgignore"
 GIT_DIR = ".git"
+XG_DIR = ".xg"
+"""Where a folder declares what it exposes as context; see :mod:`xg_project.module`."""
 
 DEFAULT_MAX_BYTES = 200_000
 """Files above this are skipped rather than read.
@@ -136,16 +149,36 @@ def _read_ignore_file(path: Path) -> list[str]:
         return []
 
 
-def read_tree(root: str | Path = ".", *, max_bytes: int = DEFAULT_MAX_BYTES) -> Tree:
-    """Read every readable file below ``root``, honouring the ignore files.
+def is_bookkeeping(relpath: str) -> bool:
+    """Whether a path is xg's own bookkeeping rather than project content.
 
-    Files are visited in sorted order at every level, so the mapping and the
-    skipped list are stable between runs.
+    Public because two callers need the same answer: the reader, which must not
+    return a manifest as content, and module resolution, which must not expose
+    one.
+    """
+    return XG_DIR in relpath.split("/")
+
+
+def candidates(
+    root: str | Path = ".", *, include: Sequence[str] | None = None
+) -> Iterator[tuple[str, Path]]:
+    """Every file below ``root`` that the ignore rules allow, in sorted order.
+
+    Yields ``(relpath, path)``. The walk is shared by the reader and by module
+discovery, so there is one definition of what "the project's files" means
+    rather than two that agree until they do not.
+
+    ``include``, when given, holds gitignore-syntax patterns rooted at ``root``.
+    A file that matches none of them is not a candidate, which is how an exposed
+    context is enforced: the files outside it are never offered to anyone.
+
+    The ignore files are never candidates. The ``.xg`` directory is walked, so
+    that manifests can be found, but the files in it are left for the caller to
+    identify by path.
     """
     root = Path(root).resolve()
     ignores = _Ignores()
-    files: dict[str, str] = {}
-    skipped: list[str] = []
+    bounded = pathspec.GitIgnoreSpec.from_lines(include) if include is not None else None
 
     for dirpath, dirnames, filenames in os.walk(root):
         here = Path(dirpath)
@@ -164,27 +197,51 @@ def read_tree(root: str | Path = ".", *, max_bytes: int = DEFAULT_MAX_BYTES) -> 
         )
 
         for name in sorted(filenames):
-            path = here / name
-            relpath = _relpath(path, root)
             if name in (GITIGNORE, XGIGNORE) or name == GIT_DIR:
                 continue
+            path = here / name
+            relpath = _relpath(path, root)
             if ignores.match(relpath):
                 continue
-
-            try:
-                size = path.stat().st_size
-            except OSError as error:
-                skipped.append(f"{relpath} (stat failed: {error})")
+            if bounded is not None and not bounded.match_file(relpath):
                 continue
-            if size > max_bytes:
-                skipped.append(f"{relpath} ({size} bytes, over {max_bytes})")
-                continue
+            yield relpath, path
 
-            try:
-                files[relpath] = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                skipped.append(f"{relpath} (not UTF-8 text)")
-            except OSError as error:
-                skipped.append(f"{relpath} (read failed: {error})")
 
-    return Tree(root=root, files=dict(sorted(files.items())), skipped=tuple(skipped))
+def read_tree(
+    root: str | Path = ".",
+    *,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    include: Sequence[str] | None = None,
+) -> Tree:
+    """Read every readable file below ``root``, honouring the ignore files.
+
+    ``include`` bounds what is read to the files a context module declared; with
+    no include, the whole non-ignored tree is read. Files are visited in sorted
+    order at every level, so the mapping and the skipped list are stable between
+    runs.
+    """
+    resolved = Path(root).resolve()
+    files: dict[str, str] = {}
+    skipped: list[str] = []
+
+    for relpath, path in candidates(resolved, include=include):
+        if is_bookkeeping(relpath):
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError as error:
+            skipped.append(f"{relpath} (stat failed: {error})")
+            continue
+        if size > max_bytes:
+            skipped.append(f"{relpath} ({size} bytes, over {max_bytes})")
+            continue
+
+        try:
+            files[relpath] = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            skipped.append(f"{relpath} (not UTF-8 text)")
+        except OSError as error:
+            skipped.append(f"{relpath} (read failed: {error})")
+
+    return Tree(root=resolved, files=dict(sorted(files.items())), skipped=tuple(skipped))

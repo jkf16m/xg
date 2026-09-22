@@ -15,6 +15,17 @@ dependencies = [
     # the async client because a synchronous call inside a Textual message
     # handler would freeze the interface for the length of a round trip.
     "typesafe-sdk>=0.6",
+    # The command line is click's: `xg_project.commands` splits `/go FILTER` and
+    # checks the arguments, and is driven in-process through `standalone_mode=False`
+    # rather than as a program, because a command typed into the TUI must be
+    # answered without leaving it. Already present transitively; named here because
+    # depending on a package that arrives by accident is a bug waiting to happen.
+    "click>=8.2",
+    # The executor speaks OpenRouter's OpenAI-compatible API directly, so it
+    # needs an HTTP client. httpx's async client is what the SDK already uses
+    # underneath, and `xg_project.llm` holds one connection open across
+    # proposals the same way Jev holds its TypeSafe connection open.
+    "httpx>=0.28",
 ]
 
 [project.scripts]

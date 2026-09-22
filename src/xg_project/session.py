@@ -1,27 +1,42 @@
-"""The session: where the user is, what they have asked for, and where they have been.
+"""The session: where the user is, and what the nodes have introduced so far.
 
-The session owns exactly one piece of durable state — ``position``, a node name.
-Everything else it holds is derived from the graph or is a record of what
-happened. That is deliberate: it is the whole reason a run needs no executor to
-be resumable.
+The session owns two pieces of durable state. ``position`` is a node name — where
+the run is. ``state`` is a mapping keyed by node name, holding the value each
+node introduced when it ran. That is deliberate: a run needs no executor to be
+resumable because everything it learned is a plain value under a node key.
 
-Two things accumulate as a run proceeds, and they are different in kind.
-``trail`` is where the user has *been*: a path, kept for display. ``context`` is
-what has been *learned*: the entries that decision nodes contributed, in the
-order they were contributed, which is what a later node is handed. A trail entry
-is a node name; a context entry is a sentence.
+The state is keyed by node rather than accumulated in a list, and that is the
+point of the model. A later node reads one earlier node's entry by that node's
+key (SORT reads FILTER's files, EDIT reads SORT's ranking), so the shape a node
+depends on is written down and checked rather than inferred from ordering.
 
-Moves and prompts return small result records instead of raising. Being refused
-a move is a normal thing for a user to do — ``:none`` from ``none``, or typing a
-node name that does not exist — and the TUI shows the refusal as a sentence
-rather than a traceback.
+Two things are not stored. ``trail`` is the path from the origin down to where
+the run is, derived from the graph rather than remembered from the moves, so it
+shrinks when the run goes back up instead of growing forever. ``context`` is
+derived from the state for the one place prose is wanted — the text Jev is shown
+when it routes — so it cannot drift from the state it summarizes.
+
+**The state is the path, not a history.** A node's entry is dropped as soon as
+the run moves somewhere that leaves it behind, so the state holds exactly what
+the nodes on the current path contributed and nothing else. This is what makes
+walking back up safe. A deeper node's state was derived from a shallower one's,
+so going up to re-run the shallower node has to invalidate the derivation: after
+moving from SORT back to FILTER, SORT's ranking of the files that were just
+discarded must not be left where EDIT can find it. The same applies sideways —
+a node the run stepped away from is a node it is no longer standing on.
+
+Moves return small result records instead of raising. Being refused a move is a
+normal thing for a user to do — ``/go ..`` from the origin, or typing a node name
+that does not exist — and the TUI shows the refusal as a sentence rather than a
+traceback.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from xg_project.graph import Actor, NodeKind, Registry
+from xg_project.graph import Actor, Registry
 
 
 @dataclass(frozen=True)
@@ -34,41 +49,49 @@ class Move:
     reason: str | None = None
 
 
-@dataclass(frozen=True)
-class Run:
-    """The outcome of submitting a prompt at whichever node is current.
+def brief(value: object) -> str:
+    """A short, one-line reading of one node's state, for routing text.
 
-    ``result`` means different things by kind, and that is the point of keeping
-    ``kind`` on the record: at a generative node it is the answer, and at a
-    decision node it is what the node added to the context window instead. A
-    caller that logs both the same way would be reporting a routing note as an
-    answer.
+    Deliberately conservative: it recognizes the few shapes the built-in graph
+    produces and falls back to ``str`` for anything a user defined, so a new node
+    is still legible to Jev without teaching this function about it.
     """
-
-    node: str
-    prompt: str
-    result: str
-    kind: NodeKind = NodeKind.GENERATIVE
-    is_goal: bool = False
+    if isinstance(value, str):
+        return value
+    preview = getattr(value, "preview", None)
+    if callable(preview):
+        # A gate or a proposal knows how to render itself; asking it keeps this
+        # function from having to know every node's value type.
+        return str(preview())
+    if isinstance(value, Mapping):
+        goal = value.get("goal")
+        if isinstance(goal, str):
+            return goal
+        files = value.get("files")
+        if isinstance(files, Mapping):
+            return f"{len(files)} files"
+        problem = value.get("problem")
+        if problem:
+            return f"problem: {problem}"
+    return str(value)
 
 
 @dataclass
 class Session:
-    """One conversation: a position, a trail, a context window, and the goal."""
+    """One conversation: a position, and the state the nodes on the way here left.
+
+    There is no trail field: the trail is the path to ``position``, and the state
+    is pruned to the same path on every move. Both are therefore consequences of
+    the position rather than a second thing that could disagree with it.
+    """
 
     graph: Registry
     position: str = ""
-    trail: tuple[str, ...] = field(default_factory=tuple)
-    goal: str | None = None
-    context: list[str] = field(default_factory=list)
+    state: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.position:
             self.position = self.graph.origin.name
-        if not self.trail:
-            # The trail starts where the session did. A path that lists only the
-            # moves made reads as if the session began at the first move.
-            self.trail = (self.position,)
 
     @property
     def node(self):
@@ -91,39 +114,69 @@ class Session:
 
         moved = Move(frm=self.position, to=to, ok=True)
         self.position = to
-        self.trail = (*self.trail, to)
+        self._keep_path()
         return moved
 
-    def submit(self, prompt: str) -> Run:
-        """Run ``prompt`` at the current node and return what it produced.
+    def _path(self) -> tuple[str, ...] | None:
+        """The path from the origin down to the position, or ``None`` if there is none.
 
-        The node's kind decides what "produced" means. A prompt arriving at the
-        origin is a *goal*: it is kept so a later move can act on it, and it is
-        added to the context window because the origin is a decision node. At a
-        generative node the handler's return value is the result, and nothing is
-        added to the context window.
+        A node with no route back to the origin is a defect in a graph somebody
+        added, not a user error, and it is not worth raising in the middle of a
+        move that was otherwise allowed. ``None`` says "cannot tell", and each
+        caller does the safe thing with that rather than the two of them crashing.
         """
-        node = self.node
-        is_goal = node.name == self.graph.origin.name
-        if is_goal:
-            self.goal = prompt
+        try:
+            return tuple(self.graph.ancestors(self.position))
+        except ValueError:
+            return None
 
-        if node.handle is None:
-            result = "this node has nothing to do yet"
-        else:
-            result = node.handle(prompt)
+    def _keep_path(self) -> None:
+        """Drop the state of every node that is not on the path to the position."""
+        path = self._path()
+        if path is None:
+            # An unreadable path means we cannot tell what is still current, and
+            # clearing the wrong half is worse than leaving both halves standing.
+            return
+        on_path = set(path)
+        for name in [name for name in self.state if name not in on_path]:
+            del self.state[name]
 
-        if node.builds_context:
-            # The contribution is what later nodes are handed, so it is appended
-            # here rather than at the call site: every route into a decision
-            # node has to contribute, and a caller that forgot would silently
-            # produce a context window with a hole in it.
-            self.context.append(result)
+    @property
+    def trail(self) -> tuple[str, ...]:
+        """The path from the origin down to here.
 
-        return Run(
-            node=node.name,
-            prompt=prompt,
-            result=result,
-            kind=node.kind,
-            is_goal=is_goal,
-        )
+        A path, not a history: going back up makes it shorter, and descending and
+        returning any number of times leaves it the length it is. It is derived
+        from the graph, so it also names the nodes the run passed through without
+        landing on — which is exactly the set of nodes that may have state.
+        """
+        path = self._path()
+        return path if path is not None else (self.position,)
+
+    def record(self, node: str, produced: object) -> None:
+        """Store what a node introduced under that node's own key.
+
+        One entry per node, replaced on re-entry: running a node again produces
+        the state for where the run is now, not a second version to compare
+        against.
+        """
+        self.state[node] = produced
+
+    @property
+    def goal(self) -> str | None:
+        """The origin's reading of the request, once the origin has run."""
+        value = self.state.get(self.graph.origin.name)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, Mapping) and isinstance(value.get("goal"), str):
+            return str(value["goal"])
+        return None
+
+    @property
+    def context(self) -> list[str]:
+        """The state as labelled lines, for the one consumer that wants prose.
+
+        Jev routes from this. Deriving it means the state remains the single
+        source: there is no parallel list that a node could forget to update.
+        """
+        return [f"{name}: {brief(value)}" for name, value in self.state.items()]

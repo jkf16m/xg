@@ -48,7 +48,7 @@ from pathlib import Path
 from langgraph.graph import END
 
 from xg_project.graph.langgraph_tree import NodeFn, TreeBuilder, TreeState
-from xg_project.jev import DEFAULT_SELECT_BATCH_BYTES, RELEVANCE_THRESHOLD, Jev
+from xg_project.jev import RELEVANCE_THRESHOLD, Jev
 from xg_project.read import DEFAULT_MAX_BYTES, read_tree
 
 XG_ORIGIN = "xg_origin"
@@ -86,7 +86,7 @@ def _collect(root: Path | str | None, max_bytes: int) -> NodeFn:
     return collect
 
 
-def _sort(jev: Jev | None, threshold: float, batch_bytes: int) -> NodeFn:
+def _sort(jev: Jev | None, threshold: float) -> NodeFn:
     """Build the node that asks Jev which files matter.
 
     An async node: the question is a network round trip, and the walk awaits it.
@@ -108,7 +108,6 @@ def _sort(jev: Jev | None, threshold: float, batch_bytes: int) -> NodeFn:
             files=files,
             prompt=str(state.get("prompt", "")),
             threshold=threshold,
-            batch_bytes=batch_bytes,
         )
         return {
             "trail": [XG_SORT],
@@ -163,7 +162,6 @@ def default_read_tree(
     respond: Responder | None = None,
     threshold: float = RELEVANCE_THRESHOLD,
     max_bytes: int = DEFAULT_MAX_BYTES,
-    batch_bytes: int = DEFAULT_SELECT_BATCH_BYTES,
 ) -> TreeBuilder:
     """Build the read-only graph. Unsealed, so extensions can still register."""
     tree = TreeBuilder()
@@ -183,7 +181,7 @@ def default_read_tree(
     )
     tree.add_node(
         XG_SORT,
-        _sort(jev, threshold, batch_bytes),
+        _sort(jev, threshold),
         summary=(
             "Ask Jev, once per file, whether that file is relevant to the "
             "question, and keep the files above the threshold."

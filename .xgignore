@@ -6,9 +6,11 @@
 #
 # .gitignore already covers what git should not track. This file covers what git
 # may track but xg should not read: local material that would be read as project
-# content, and generated files too large to be useful context.
+# content, generated files too large to be useful context, and material that
+# costs more context than it returns.
 
-# Local material that must not become model context.
+# Local material that must not become model context. .gitignore does not cover
+# these, so without them a stray .env is read and sent to a model.
 .env
 .env.*
 *.pem
@@ -20,3 +22,8 @@ id_rsa*
 *.min.js
 *.min.css
 *.map
+
+# Tests are judged by running them, not by a model reading them. They are about
+# a third of this tree and none of it is application code, so reading them costs
+# the context budget that the source needs.
+tests/

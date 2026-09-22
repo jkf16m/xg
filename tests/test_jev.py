@@ -388,6 +388,30 @@ async def test_the_selection_state_is_the_file_map_itself() -> None:
     assert client.calls[0]["state"] == FILES
 
 
+async def test_each_question_names_its_own_file() -> None:
+    """A question's id is not sent to the model, so the path must be in its text.
+
+    Without this, every question in a batch carries identical instructions and the
+    model cannot tell which file it is judging — the scores stop meaning anything.
+    """
+    client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.2}))
+    await select_files(client)
+    for path, question in client.calls[0]["questions"].items():
+        assert path in str(question.instructions)
+
+
+async def test_a_callers_question_replaces_the_default_relevance_one() -> None:
+    """Filter asks whether a file belongs; sort asks which survivor matters most."""
+    from xg_project.jev import IMPORTANCE_CRITERIA
+
+    client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.2}))
+    await select_files(client, instructions="rank this", criteria=IMPORTANCE_CRITERIA)
+
+    question = client.calls[0]["questions"]["src/parse.py"]
+    assert question.instructions == "rank this"
+    assert question.criteria == IMPORTANCE_CRITERIA
+
+
 async def test_files_above_the_threshold_are_kept_and_the_rest_dropped() -> None:
     client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.4}))
     selection = await select_files(client)
@@ -397,9 +421,10 @@ async def test_files_above_the_threshold_are_kept_and_the_rest_dropped() -> None
 
 
 async def test_the_threshold_is_exclusive() -> None:
-    """More than 0.85: a file exactly at 0.85 is dropped."""
-    client = FakeClient(result=noul_response({"src/parse.py": 0.85, "docs/readme.md": 0.86}))
+    """The default is 0.5: a file exactly at it is dropped, one above is kept."""
+    client = FakeClient(result=noul_response({"src/parse.py": 0.5, "docs/readme.md": 0.51}))
     selection = await select_files(client)
+    assert selection.threshold == 0.5
     assert set(selection.files) == {"docs/readme.md"}
 
 
@@ -444,15 +469,27 @@ def test_explain_reports_the_kept_count_against_the_whole() -> None:
 class EchoClient:
     """Answers every question with a fixed probability and records each request."""
 
-    def __init__(self, *, score: float = 0.9, fail_on: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        score: float = 0.9,
+        fail_on: int | None = None,
+        always_fail: bool = False,
+        fail_status: int = 400,
+    ) -> None:
         self.score = score
         self.fail_on = fail_on
+        self.always_fail = always_fail
+        self.fail_status = fail_status
         self.calls: list[dict] = []
 
     async def system_one(self, *, state, questions):
         self.calls.append({"state": state, "questions": questions})
-        if self.fail_on is not None and len(self.calls) == self.fail_on:
-            raise TypeSafeAPIError(400, {"error": "boom"}, httpx2.Headers())
+        refused = self.always_fail or (
+            self.fail_on is not None and len(self.calls) == self.fail_on
+        )
+        if refused:
+            raise TypeSafeAPIError(self.fail_status, {"error": "boom"}, httpx2.Headers())
         return SystemOneResponse(
             model="jev-latest",
             usage=Usage(),
@@ -466,38 +503,51 @@ class EchoClient:
 BIG = {f"f{index}.py": "x" * 500 for index in range(10)}
 
 
-async def test_a_file_set_larger_than_the_budget_is_split_across_requests() -> None:
+async def test_every_file_goes_into_one_request() -> None:
+    """One request, so the model judges the files against each other."""
     client = EchoClient()
-    await Jev(client=client).select(files=BIG, prompt="q", batch_bytes=1500)
-    assert len(client.calls) > 1
-    covered = {path for call in client.calls for path in call["state"]}
-    assert covered == set(BIG)
-
-
-async def test_every_file_is_scored_whichever_batch_it_landed_in() -> None:
-    client = EchoClient()
-    selection = await Jev(client=client).select(files=BIG, prompt="q", batch_bytes=1500)
-    assert set(selection.scores) == set(BIG)
+    selection = await Jev(client=client).select(files=BIG, prompt="q")
+    assert len(client.calls) == 1
+    assert set(client.calls[0]["state"]) == set(BIG)
     assert set(selection.files) == set(BIG)
-    assert selection.requests == len(client.calls)
+    assert set(selection.scores) == set(BIG)
+    assert selection.requests == 1
 
 
-async def test_a_file_larger_than_the_budget_is_sent_alone_rather_than_cut() -> None:
-    files = {"huge.py": "x" * 5000, "small.py": "y"}
-    client = EchoClient()
-    selection = await Jev(client=client).select(files=files, prompt="q", batch_bytes=100)
-    assert client.calls[0]["state"] == {"huge.py": "x" * 5000}
-    assert selection.files["huge.py"] == "x" * 5000
-
-
-async def test_one_failed_batch_does_not_lose_the_others() -> None:
+async def test_a_refused_request_drops_the_largest_files_and_asks_again() -> None:
     client = EchoClient(fail_on=1)
-    selection = await Jev(client=client).select(files=BIG, prompt="q", batch_bytes=1500)
+    selection = await Jev(client=client).select(files=BIG, prompt="q")
+    assert len(client.calls) == 2
+    assert selection.requests == 2
+    assert selection.dropped
+    remaining = set(BIG) - set(selection.dropped)
+    assert set(client.calls[1]["state"]) == remaining
+    assert set(selection.files) == remaining
+
+
+async def test_the_files_that_did_not_fit_are_reported_not_silently_scored() -> None:
+    client = EchoClient(fail_on=1)
+    selection = await Jev(client=client).select(files=BIG, prompt="q")
+    for path in selection.dropped:
+        assert selection.scores[path] == 0.0
+        assert path not in selection.files
+    assert "did not fit" in selection.explain()
+
+
+async def test_a_rejection_that_is_not_about_size_is_reported_without_retrying() -> None:
+    """A rate limit is not a payload problem, so shrinking would be pointless."""
+    client = EchoClient(fail_on=1, fail_status=429)
+    selection = await Jev(client=client).select(files=BIG, prompt="q")
     assert not selection.ok
+    assert len(client.calls) == 1
     assert "Jev rejected the request" in (selection.problem or "")
-    # The failed batch's files were never scored, so they are dropped; the rest
-    # are kept, which is the whole point of reporting rather than raising.
-    assert 0 < len(selection.files) < len(BIG)
+
+
+async def test_a_file_that_is_refused_even_alone_is_a_problem() -> None:
+    client = EchoClient(always_fail=True)
+    selection = await Jev(client=client).select(files={"only.py": "x"}, prompt="q")
+    assert not selection.ok
+    assert "refused even one file" in (selection.problem or "")
 
 
 async def test_a_single_request_is_the_common_case() -> None:
