@@ -24,6 +24,14 @@ bidirectional; what is asymmetric is who may drive a move. ``Actor.JEV`` may
 only descend (strictly higher level); ``Actor.USER`` may move anywhere. That rule
 is one predicate, held in one place, so there is exactly one definition of it.
 
+**The graph is a graph, not a tree.** A node may be the child of two others, and
+a node may reach one of its own ancestors. Both are things a user may configure,
+so neither is treated as a defect: the drawing carries every edge, and "the path
+back to the origin" is the shortest one rather than the only one. Anything that
+walked parent by parent would need a cycle check before it could terminate, and
+would then have to decide what a cycle means — a shortest path needs no answer,
+because a node already reached is never expanded twice.
+
 Levels are genericity. Level 0 is the origin, the most generic node; deeper
 nodes are more specific. "Up" always means toward the origin, and "down" always
 means away from it.
@@ -35,15 +43,26 @@ boundary visible.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from graphtty import RenderOptions, render
+
 if TYPE_CHECKING:  # annotations only, so the registry stays free of the drivers
     from xg_project.jev import Jev
     from xg_project.llm import Executor
+
+HERE = "◀ you are here"
+"""How the drawing marks the node the run is standing on.
+
+A line inside the node's own box rather than a colour or a symbol beside it: the
+drawing is a string, and a marker that still says what it meant after being
+logged or pasted somewhere is worth more than one that does not.
+"""
 
 XG_PREFIX = "_XG_"
 """Every node the built-in graph ships is named with this prefix.
@@ -133,9 +152,10 @@ class NodeDeclaration:
     awaits it.
 
     ``children`` names the nodes reachable downward from here. It is the
-    successor list, so the tree the TUI draws, the ancestor walk that decides
-    "up", and the option set Jev chooses from are all derived from it rather
-    than stored twice.
+    successor list, so the graph the TUI draws, the path walk that decides "up",
+    and the option set Jev chooses from are all derived from it rather than
+    stored twice. Successors rather than edges: a node declares what it leads to,
+    and every edge in the graph is one declaration's successor entry.
     """
 
     name: str
@@ -243,46 +263,103 @@ class Registry:
             if self.check_move(frm, child, Actor.JEV) is None
         }
 
-    def parents(self) -> dict[str, str]:
-        """Child name -> parent name, derived from ``children``.
+    def edges(self) -> list[tuple[str, str]]:
+        """Every edge as ``(parent, child)``, sorted so a drawing is stable.
 
-        Built fresh rather than stored, so a declaration cannot contradict
-        itself about what its neighbours are.
+        The declarations hold successors, so this is the same structure read as
+        edges rather than a second thing to keep in step. A child that is not a
+        node is a defect in a declaration, not a node that is missing, and is
+        raised here rather than drawn as a box nobody declared.
         """
-        out: dict[str, str] = {}
+        out: list[tuple[str, str]] = []
         for node in self._nodes.values():
             for child in node.children:
                 if child not in self._nodes:
                     raise UnknownNode(f"{node.name!r} lists unknown child {child!r}")
-                out[child] = node.name
-        return out
+                out.append((node.name, child))
+        return sorted(
+            out,
+            key=lambda edge: (
+                self._nodes[edge[0]].level,
+                edge[0],
+                self._nodes[edge[1]].level,
+                edge[1],
+            ),
+        )
+
+    def parents(self) -> dict[str, tuple[str, ...]]:
+        """Child name -> every node that leads to it, derived from ``children``.
+
+        Built fresh rather than stored, so a declaration cannot contradict
+        itself about what its neighbours are.
+
+        A tuple rather than one name because the graph is not a tree: two nodes
+        may lead to the same child, and a node that leads back to one of its own
+        ancestors is a cycle. Both are configurations a user may write, so
+        neither is collapsed into a single parent or refused.
+        """
+        out: dict[str, list[str]] = {}
+        for parent, child in self.edges():
+            out.setdefault(child, []).append(parent)
+        return {child: tuple(parents) for child, parents in out.items()}
 
     def parent(self, name: str) -> str | None:
-        """The node directly above ``name``, or ``None`` when it is the origin.
+        """What ``/go ..`` resolves to: the node above ``name`` on the path here.
 
-        This is what the ``/go ..`` move resolves against. It looks the node up
-        first, so a typo raises :class:`UnknownNode` rather than reading as
-        "already at the origin".
+        With a single route back to the origin this is the only parent. With
+        several, or with a cycle making some routes longer, it is the parent on
+        the *shortest* path — the one :meth:`ancestors` returns — so "up" agrees
+        with the trail the TUI draws instead of being a second opinion about it.
+
+        ``None`` at the origin, and for a node no route reaches. It looks the
+        node up first, so a typo raises :class:`UnknownNode` rather than reading
+        as "already at the origin".
         """
         self.get(name)
-        return self.parents().get(name)
+        try:
+            path = self.ancestors(name)
+        except ValueError:
+            return None
+        return path[-2] if len(path) > 1 else None
 
     def ancestors(self, name: str) -> list[str]:
-        """The path from the origin down to ``name``, inclusive.
+        """The shortest path from the origin down to ``name``, inclusive.
 
-        Walks parents until the origin. A node with no parent that is not the
-        origin is unreachable, which is a graph defect rather than a user error.
+        Breadth-first from the origin. Two properties follow from that and both
+        matter here: a graph offering two routes picks the shorter one
+        deterministically rather than whichever the insertion order happened to
+        visit first, and a cycle terminates instead of walking it forever. A
+        node already reached is never expanded twice.
+
+        A node no route reaches is a defect in a graph somebody added, and is
+        raised rather than papered over: the trail would otherwise claim a path
+        that does not exist.
         """
         self.get(name)
-        parents = self.parents()
-        path = [name]
-        while (parent := parents.get(path[-1])) is not None:
-            if parent in path:
-                raise ValueError(f"cycle in graph above {name!r}")
-            path.append(parent)
-        path.reverse()
-        if path[0] != self.origin.name:
+        origin = self.origin.name
+
+        successors: dict[str, list[str]] = {node.name: [] for node in self._nodes.values()}
+        for parent, child in self.edges():
+            successors[parent].append(child)
+
+        came_from: dict[str, str] = {origin: origin}
+        queue: deque[str] = deque([origin])
+        while queue:
+            current = queue.popleft()
+            if current == name:
+                break
+            for child in successors[current]:
+                if child not in came_from:
+                    came_from[child] = current
+                    queue.append(child)
+
+        if name not in came_from:
             raise ValueError(f"{name!r} is not reachable from the origin")
+
+        path = [name]
+        while path[-1] != origin:
+            path.append(came_from[path[-1]])
+        path.reverse()
         return path
 
     def check_move(self, frm: str, to: str, actor: Actor) -> str | None:
@@ -305,41 +382,44 @@ class Registry:
             return f"only the user moves {direction}"
         return None
 
-    def render_tree(self, current: str) -> str:
-        """A Rich-markup drawing of the whole graph with ``current`` marked.
+    def render_graph(self, current: str, *, max_width: int | None = None) -> str:
+        """The whole graph drawn as a graph, with ``current`` marked.
 
-        Rendered from the origin by depth-first walk over ``children``, so what
-        is shown is the graph's own structure and not a second description of it.
+        Every edge is handed to the layout engine, because a traversal is a
+        statement about trees: walking ``children`` from the origin would draw a
+        node with two parents under only one of them, and would have to decide
+        what to do about a cycle before it could finish at all. The registry's
+        edges are what the drawing is made of, so what is shown cannot disagree
+        with what the movement rules allow.
+
+        ``max_width`` bounds the drawing horizontally. The engine re-renders with
+        shortened text to fit, rather than truncating the right-hand edge, which
+        would take the boxes there with it.
         """
-        marked: set[str] = set()
-        lines: list[str] = []
+        self.get(current)
+        origin = self.origin.name
+        drawing = {
+            "nodes": [self._drawn_node(node, current=current, origin=origin) for node in self.sorted()],
+            "edges": [
+                {"source": parent, "target": child} for parent, child in self.edges()
+            ],
+        }
+        return render(drawing, RenderOptions(max_width=max_width))
 
-        def walk(name: str, prefix: str, is_last: bool, root: bool) -> None:
-            node = self._nodes[name]
-            if node.name in marked:
-                lines.append(f"{prefix}[dim]{node.name} (already shown)[/dim]")
-                return
-            marked.add(node.name)
+    def _drawn_node(
+        self, node: NodeDeclaration, *, current: str, origin: str
+    ) -> dict[str, str]:
+        """One node in the shape the layout engine takes.
 
-            here = node.name == current
-            connector = "" if root else ("└── " if is_last else "├── ")
-            marker = "[b cyan]◆[/b cyan]" if here else "[dim]○[/dim]"
-            label = f"[b]{node.name}[/b]" if here else node.name
-            kind = "decision" if node.kind is NodeKind.DECISION else "generative"
-            note = f"  [dim]{kind}"
-            if root:
-                note += " · origin"
-            if here:
-                note += "[/dim]  [cyan]← you are here[/cyan]"
-            elif not node.children:
-                note += " · leaf[/dim]"
-            else:
-                note += "[/dim]"
-            lines.append(f"{prefix}{connector}{marker} {label}{note}")
-
-            child_prefix = prefix + ("" if root else ("    " if is_last else "│   "))
-            for index, child in enumerate(node.children):
-                walk(child, child_prefix, index == len(node.children) - 1, False)
-
-        walk(self.origin.name, "", True, True)
-        return "\n".join(lines)
+        The type label is the node's kind, except at the origin, which gets a
+        label of its own: "where a run starts" is the one thing about the origin
+        worth reading that its kind does not say.
+        """
+        drawn = {
+            "id": node.name,
+            "name": node.name,
+            "type": "origin" if node.name == origin else node.kind.value,
+        }
+        if node.name == current:
+            drawn["description"] = HERE
+        return drawn

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from xg_project.graph import (
+    ADD,
     ANSWER,
     COMMAND,
     EDIT,
@@ -30,7 +31,7 @@ from xg_project.jev import (
     Routing,
     Selection,
 )
-from xg_project.llm import Answer, CommandProposal, EditProposal
+from xg_project.llm import AddProposal, Answer, CommandProposal, EditProposal
 from xg_project.session import Session
 from xg_project.turn import ACCEPTED, REJECTED, take_turn
 
@@ -93,15 +94,25 @@ class FakeExecutor:
     """Stands in for `Executor`: a fixed command, edit, and answer."""
 
     def __init__(self, *, command: str = "echo hi", old: str = "x = 1", new: str = "x = 2",
-                 problem: str | None = None, answer: str = "it is a project") -> None:
+                 problem: str | None = None, answer: str = "it is a project",
+                 path: str = "pkg/new_mod.py", content: str = "def f():\n    pass\n") -> None:
         self.command = command
         self.old = old
         self.new = new
         self.problem = problem
         self.reply = answer
+        self.path = path
+        self.content = content
         self.command_calls: list[str] = []
         self.edit_calls: list[dict] = []
+        self.add_calls: list[dict] = []
         self.answer_calls: list[dict] = []
+
+    async def propose_add(self, *, prompt, context=()):
+        self.add_calls.append({"prompt": prompt, "context": list(context)})
+        if self.problem is not None:
+            return AddProposal(problem=self.problem)
+        return AddProposal(path=self.path, content=self.content, rationale="a new file")
 
     async def propose_command(self, *, prompt, context=()):
         self.command_calls.append(prompt)
@@ -172,7 +183,7 @@ async def test_a_branching_node_offers_its_children_and_moves_where_jev_says(
     jev = FakeJev(choice=SELECT_MODULE)
     turn = await take_turn(session, "edit a file", jev=jev)
 
-    assert set(jev.decide_calls[0]["options"]) == {COMMAND, SELECT_MODULE}
+    assert set(jev.decide_calls[0]["options"]) == {ADD, COMMAND, SELECT_MODULE}
     assert turn.moved is not None and turn.moved.ok
     assert turn.descended
     assert session.position == SELECT_MODULE
@@ -363,6 +374,39 @@ async def test_command_ends_the_turn_on_a_gate(session: Session) -> None:
     assert turn.gate.proposal.command == "git log -1"
     assert session.state[COMMAND] is turn.gate
     assert session.position == COMMAND
+
+
+async def test_add_ends_the_turn_on_a_gate_for_a_new_file(session: Session) -> None:
+    session.move(ADD)
+    executor = FakeExecutor(path="pkg/new_mod.py", content="def f():\n    pass\n")
+    turn = await take_turn(session, "add a module for f", executor=executor)
+
+    assert turn.awaiting
+    assert turn.gate is not None
+    assert turn.proposal is not None
+    assert turn.proposal.path == "pkg/new_mod.py"
+    assert session.state[ADD] is turn.gate
+    assert session.position == ADD
+
+
+async def test_add_reads_nothing_and_the_project_is_not_consulted(session: Session) -> None:
+    """There is nothing to read: the file being asked for does not exist yet."""
+    session.move(ADD)
+    executor = FakeExecutor()
+    await take_turn(session, "add a new file", executor=executor)
+
+    assert executor.add_calls[0]["prompt"] == "add a new file"
+    assert executor.edit_calls == []
+    assert executor.answer_calls == []
+
+
+async def test_add_without_an_executor_reports_a_problem(session: Session) -> None:
+    session.move(ADD)
+    turn = await take_turn(session, "add a new file")
+
+    assert turn.awaiting
+    assert turn.proposal is not None and not turn.proposal.ok
+    assert "no executor" in turn.proposal.problem
 
 
 async def test_edit_uses_the_file_sort_ranked_first(session: Session) -> None:

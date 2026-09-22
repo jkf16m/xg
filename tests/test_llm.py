@@ -14,19 +14,23 @@ import json
 import httpx
 
 from xg_project.llm import (
+    ADD_FILE,
     CHAT_COMPLETIONS,
     EDIT_FILE,
     ENV_API_KEY,
     MODEL,
     READ_FILE,
     RUN_COMMAND,
+    AddProposal,
     Answer,
     CommandProposal,
     EditProposal,
     Executor,
+    build_add_body,
     build_answer_body,
     build_command_body,
     build_edit_body,
+    parse_add_proposal,
     parse_command_proposal,
     parse_edit_proposal,
 )
@@ -116,6 +120,17 @@ def edit_response(
     return tool_response(EDIT_FILE, arguments)
 
 
+def add_response(
+    path: str = "pkg/greet.py",
+    content: str = 'def greet():\n    return "hi"\n',
+    rationale: str | None = "a new module",
+) -> dict:
+    arguments = {"path": path, "content": content}
+    if rationale is not None:
+        arguments["rationale"] = rationale
+    return tool_response(ADD_FILE, arguments)
+
+
 async def propose_command(executor: Executor, **overrides) -> CommandProposal:
     kwargs = {"prompt": "list the files"}
     return await executor.propose_command(**{**kwargs, **overrides})
@@ -124,6 +139,11 @@ async def propose_command(executor: Executor, **overrides) -> CommandProposal:
 async def propose_edit(executor: Executor, **overrides) -> EditProposal:
     kwargs = {"path": "src/a.py", "content": "x = 1\n", "prompt": "make it two"}
     return await executor.propose_edit(**{**kwargs, **overrides})
+
+
+async def propose_add(executor: Executor, **overrides) -> AddProposal:
+    kwargs = {"prompt": "add a module for greeting"}
+    return await executor.propose_add(**{**kwargs, **overrides})
 
 
 async def ask(executor: Executor, **overrides) -> Answer:
@@ -185,6 +205,111 @@ def test_the_edit_tool_needs_only_old_and_new_text() -> None:
     ]["parameters"]
     assert set(parameters["properties"]) == {"old_text", "new_text", "rationale"}
     assert parameters["required"] == ["old_text", "new_text"]
+
+
+# -- the add request -------------------------------------------------------
+
+
+def test_the_add_body_forces_exactly_the_add_tool() -> None:
+    body = build_add_body(prompt="add a module for greeting")
+    assert body["tool_choice"] == {"type": "function", "function": {"name": ADD_FILE}}
+    assert [tool["function"]["name"] for tool in body["tools"]] == [ADD_FILE]
+
+
+def test_the_add_tool_needs_a_path_and_the_whole_content() -> None:
+    parameters = tool(build_add_body(prompt="add it"), ADD_FILE)["function"]["parameters"]
+    assert parameters["required"] == ["path", "content"]
+    assert set(parameters["properties"]) == {"path", "content", "rationale"}
+
+
+def test_an_add_declares_no_reads_because_there_is_nothing_to_read() -> None:
+    """The file does not exist yet, so a transcript of reads would be a fiction."""
+    body = build_add_body(prompt="add a module for greeting")
+    assert [message["role"] for message in body["messages"]] == ["system", "user"]
+    assert "read_file" not in json.dumps(body)
+
+
+async def test_an_add_tool_call_becomes_a_new_file_proposal() -> None:
+    client = FakeHttp(response=FakeResponse(200, add_response()))
+    proposal = await propose_add(Executor(client=client))
+
+    assert proposal.ok
+    assert isinstance(proposal, AddProposal)
+    assert proposal.path == "pkg/greet.py"
+    assert proposal.content == 'def greet():\n    return "hi"\n'
+    assert proposal.rationale == "a new module"
+    assert proposal.tool == ADD_FILE
+
+
+async def test_an_add_without_a_path_is_a_problem() -> None:
+    payload = tool_response(ADD_FILE, {"content": "x = 1\n"})
+    proposal = await propose_add(Executor(client=FakeHttp(response=FakeResponse(200, payload))))
+    assert not proposal.ok
+    assert "no path" in proposal.problem
+
+
+async def test_a_blank_add_path_is_a_problem() -> None:
+    payload = tool_response(ADD_FILE, {"path": "   ", "content": "x = 1\n"})
+    proposal = await propose_add(Executor(client=FakeHttp(response=FakeResponse(200, payload))))
+    assert not proposal.ok
+    assert "no path" in proposal.problem
+
+
+async def test_an_add_without_content_is_a_problem() -> None:
+    payload = tool_response(ADD_FILE, {"path": "pkg/greet.py"})
+    proposal = await propose_add(Executor(client=FakeHttp(response=FakeResponse(200, payload))))
+    assert not proposal.ok
+    assert "no content" in proposal.problem
+
+
+async def test_an_empty_file_is_still_a_proposal() -> None:
+    """``__init__.py`` is a real thing to add, so empty content is not a refusal."""
+    payload = tool_response(ADD_FILE, {"path": "pkg/__init__.py", "content": ""})
+    proposal = await propose_add(Executor(client=FakeHttp(response=FakeResponse(200, payload))))
+    assert proposal.ok
+    assert proposal.content == ""
+
+
+def test_an_add_is_previewed_as_creating_a_file() -> None:
+    proposal = AddProposal(path="pkg/greet.py", content='def greet():\n    return "hi"\n')
+    assert proposal.preview() == "add pkg/greet.py: 2 lines"
+
+
+def test_an_empty_addition_says_it_is_empty_rather_than_counting_a_line() -> None:
+    assert AddProposal(path="pkg/__init__.py", content="").preview() == (
+        "add pkg/__init__.py: an empty file"
+    )
+
+
+def test_an_addition_without_a_path_or_content_is_not_ok() -> None:
+    assert not AddProposal(content="x = 1\n").ok
+    assert not AddProposal(path="pkg/greet.py").ok
+
+
+def test_an_addition_renders_as_a_patch_that_creates_the_file() -> None:
+    proposal = AddProposal(path="pkg/greet.py", content='def greet():\n    return "hi"\n')
+    patch = proposal.detail()
+
+    assert patch.startswith("diff --git a/pkg/greet.py b/pkg/greet.py\n")
+    assert "new file mode 100644" in patch
+    assert "index 0000000.." in patch
+    assert "--- /dev/null" in patch
+    assert '+def greet():' in patch
+
+
+def test_an_empty_addition_draws_no_patch() -> None:
+    """No hunks, so nothing to preview; the preview line is the whole of it."""
+    assert AddProposal(path="pkg/__init__.py", content="").detail() == ""
+
+
+def test_a_command_proposal_has_no_detail() -> None:
+    """Only the file-changing proposals have more to show than one line."""
+    assert CommandProposal(command="echo hi").detail() == ""
+
+
+def test_parse_add_refuses_a_non_object() -> None:
+    proposal = parse_add_proposal("not a body")
+    assert not proposal.ok
 
 
 def test_the_file_is_read_by_a_hardcoded_tool_call_rather_than_pasted_in() -> None:

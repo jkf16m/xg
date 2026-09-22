@@ -57,6 +57,7 @@ PASS_ENTRY = "pi/openrouter"
 
 RUN_COMMAND = "run_command"
 EDIT_FILE = "edit_file"
+ADD_FILE = "add_file"
 READ_FILE = "read_file"
 """The tool the reads in a transcript are attributed to.
 
@@ -181,10 +182,67 @@ class EditProposal(Proposal):
         )
 
 
+@dataclass(frozen=True)
+class AddProposal(Proposal):
+    """A new file the executor proposed, awaiting acceptance.
+
+    Deliberately not an :class:`EditProposal`. An edit replaces text that is
+    already there and the node owns the path, because the file was chosen by the
+    workflow; an add creates a file that is not there and the model owns the
+    path, because there is nothing to choose it from.
+
+    That difference is also why the two are checked differently before they
+    happen. An edit's preview can be verified against the file it was given, so a
+    replacement that does not match is not drawn. An add's preview is against
+    nothing at all, and the file existing is precisely what its patch cannot show
+    — so the check is made at the moment of writing, by :func:`~xg_project.edit.
+    apply_add`, and a path that already exists is refused rather than overwritten.
+    """
+
+    path: str | None = None
+    content: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.problem is None and bool(self.path) and self.content is not None
+
+    @property
+    def tool(self) -> str:
+        return ADD_FILE
+
+    def preview(self) -> str:
+        if self.problem is not None:
+            return self.problem
+        if not self.content:
+            return f"add {self.path}: an empty file"
+        return f"add {self.path}: {_count(self.content)}"
+
+    def detail(self) -> str:
+        """The new file as the patch that would create it, or ``""`` for nothing.
+
+        A creation patch rather than a modification against empty content, so
+        what is shown is the file being added. An empty file has no hunks and
+        draws nothing; the one-line preview still says it is a file and that it
+        is empty, which is the whole of what there is to review.
+        """
+        if self.path is None or self.content is None:
+            return ""
+        return unified_patch(path=self.path, before="", after=self.content, new_file=True)
+
+
 def _count(text: str | None) -> str:
+    """How many lines a piece of text is, as a reader would count them.
+
+    ``splitlines`` rather than counting newlines: content ending in a newline is
+    not one line longer for it. The difference is invisible in a short ``old_text``
+    and obvious in a whole-file addition, where a two-line file would otherwise be
+    offered up as three.
+    """
     if text is None:
         return "nothing"
-    lines = text.count("\n") + 1
+    lines = len(text.splitlines())
+    if not lines:
+        return "no lines"
     return f"{lines} line" + ("" if lines == 1 else "s")
 
 
@@ -247,6 +305,21 @@ contain the answer, say what is missing rather than inventing it. Answer only; d
 not propose changes and do not call tools.
 """
 
+ADD_INSTRUCTIONS = """\
+The user wants a new file added to their project. Propose it by calling the
+`add_file` tool: the path the file should have, and its complete content.
+
+There is nothing to read, because the file does not exist yet — you are choosing
+a path, not looking one up. Write the whole file, and write it as the file it
+should be when finished: not a fragment, and not a description of what it would
+contain. Put it where its neighbours of that kind already live, following the
+project's existing layout and style.
+
+You are proposing, not writing: nothing is created until the user accepts, and a
+path that already exists is refused rather than overwritten. Put any explanation
+in the tool's optional `rationale`.
+"""
+
 
 def _command_tool() -> dict[str, object]:
     return {
@@ -306,6 +379,39 @@ def _edit_tool() -> dict[str, object]:
                     },
                 },
                 "required": ["old_text", "new_text"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _add_tool() -> dict[str, object]:
+    return {
+        "type": "function",
+        "function": {
+            "name": ADD_FILE,
+            "description": (
+                "Propose one new file: the path it should have, and its complete "
+                "content. The path must not already exist. Nothing is written "
+                "until the user accepts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path of the new file, relative to the project root.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The complete content the new file should have.",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "One sentence on what the file is for.",
+                    },
+                },
+                "required": ["path", "content"],
                 "additionalProperties": False,
             },
         },
@@ -422,6 +528,20 @@ def build_command_messages(*, prompt: str, context: Sequence[str] = ()) -> list[
     ]
 
 
+def build_add_messages(*, prompt: str, context: Sequence[str] = ()) -> list[dict[str, str]]:
+    """Messages for an added file: the request, and nothing read.
+
+    No reads, and not for want of a transcript to build: the file being asked for
+    does not exist yet, so there is nothing in the project to read *about* it. An
+    addition is decided from the request itself, which makes this the same shape
+    as a command rather than a stripped-down edit.
+    """
+    return [
+        {"role": "system", "content": ADD_INSTRUCTIONS},
+        {"role": "user", "content": _user_text(prompt=prompt, context=context)},
+    ]
+
+
 def build_edit_messages(
     *, path: str, content: str, prompt: str, context: Sequence[str] = ()
 ) -> list[dict[str, object]]:
@@ -473,6 +593,19 @@ def build_command_body(*, prompt: str, context: Sequence[str] = ()) -> dict[str,
         messages=build_command_messages(prompt=prompt, context=context),
         tools=[_command_tool()],
         tool_choice=forced_choice(RUN_COMMAND),
+    )
+
+
+def build_add_body(*, prompt: str, context: Sequence[str] = ()) -> dict[str, object]:
+    """The add request body. Kept as a named function for tests and logs.
+
+    One tool and no transcript: there is no file to declare a read of, so nothing
+    is declared beside ``add_file`` and the forced call is the whole request.
+    """
+    return build_chat_body(
+        messages=build_add_messages(prompt=prompt, context=context),
+        tools=[_add_tool()],
+        tool_choice=forced_choice(ADD_FILE),
     )
 
 
@@ -599,6 +732,31 @@ def parse_edit_proposal(data: object, *, path: str) -> EditProposal:
     )
 
 
+def parse_add_proposal(data: object) -> AddProposal:
+    """Read an `add_file` tool call into an add proposal.
+
+    The path is checked here and not only at write time because it is the model's
+    contribution rather than the workflow's: an empty one is a malformed answer,
+    which is a different thing from a path that turns out to be taken.
+    """
+    arguments, problem, model = _tool_arguments(data, ADD_FILE)
+    if problem is not None:
+        return AddProposal(problem=problem, model=model)
+    assert arguments is not None  # guaranteed when problem is None
+    path = arguments.get("path")
+    content = arguments.get("content")
+    if not isinstance(path, str) or not path.strip():
+        return AddProposal(problem="the executor proposed no path", model=model)
+    if not isinstance(content, str):
+        return AddProposal(path=path.strip(), problem="the executor proposed no content", model=model)
+    return AddProposal(
+        path=path.strip(),
+        content=content,
+        rationale=_reason(arguments),
+        model=model,
+    )
+
+
 def parse_answer(data: object) -> Answer:
     """Read a prose completion into an answer, or say why there is none."""
     if not isinstance(data, dict):
@@ -708,6 +866,14 @@ class Executor:
         # The content the model read is carried on the proposal so its change can
         # be previewed as a patch against exactly what it was shown.
         return replace(parse_edit_proposal(data, path=path), content=content)
+
+    async def propose_add(self, *, prompt: str, context: Sequence[str] = ()) -> AddProposal:
+        """Ask for one new file, and return it as a proposal."""
+        body = build_add_body(prompt=prompt, context=context)
+        data, problem = await self._request(body)
+        if problem is not None:
+            return AddProposal(problem=problem)
+        return parse_add_proposal(data)
 
     async def answer(
         self, *, files: Mapping[str, str], prompt: str, context: Sequence[str] = ()

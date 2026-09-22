@@ -2,8 +2,12 @@
 
 Two things are on screen at once, and each answers one question.
 
-- **the graph** — the whole node tree, drawn from the origin, with the current
-  node marked. This is the answer to "where can I go".
+- **the graph** — every node and every edge, with the current node marked. This
+  is the answer to "where can I go". It is drawn as a graph rather than as a
+tree, because it is one: a node may be the child of two others, and a node may
+  lead back to one of its own ancestors. A tree drawing would show a
+  multi-parent node under one parent and lose the other edge, and would have to
+decide what a cycle means before it could finish at all.
 - **the state** — what each node introduced, keyed by that node's name. This is
   the answer to "where am I and what do I know", and it is the whole of the
   application's state: there is no transcript of actions to read past.
@@ -28,11 +32,11 @@ instead, which leaves the pump free to keep drawing and handling keys, and the
 same is true of an accepted proposal. Awaiting leaves the event loop free either
 way, so the interface stays responsive while a request is in flight.
 
-A **gated** leaf — ``_XG_COMMAND`` or ``_XG_EDIT`` — does not act on its own: the
-proposal is shown and held, and the user accepts it with ``ctrl+y`` or rejects it
-with ``ctrl+n``. Nothing runs and nothing is written until they accept.
-``_XG_ANSWER`` is a leaf too, but it proposes nothing and changes nothing, so it
-simply introduces its text into the state.
+A **gated** leaf — ``_XG_COMMAND``, ``_XG_ADD`` or ``_XG_EDIT`` — does not act on
+its own: the proposal is shown and held, and the user accepts it with ``ctrl+y``
+or rejects it with ``ctrl+n``. Nothing runs and nothing is written until they
+accept. ``_XG_ANSWER`` is a leaf too, but it proposes nothing and changes
+nothing, so it simply introduces its text into the state.
 """
 
 from __future__ import annotations
@@ -58,12 +62,13 @@ from xg_project.commands import (
     is_command,
     parse,
 )
-from xg_project.edit import EditOutcome, apply_edit
+from xg_project.edit import EditOutcome, apply_add, apply_edit
 from xg_project.graph import Actor, Registry, default_graph
 from xg_project.jev import Jev
 from xg_project.llm import (
     ENV_API_KEY,
     PASS_ENTRY,
+    AddProposal,
     CommandProposal,
     EditProposal,
     Executor,
@@ -94,7 +99,7 @@ class XGApp(App[None]):
     }
     #graph {
         height: auto;
-        max-height: 60%;
+        max-height: 70%;
         overflow: hidden;
         padding: 1 2 0 2;
     }
@@ -130,6 +135,13 @@ class XGApp(App[None]):
     screen; the screen itself does not scroll, so nothing can be pushed anywhere.
     The state pane is the only thing that scrolls, because it is the only thing
     that grows without bound.
+
+    The cap is a larger share than the old one-line-per-node tree needed, because
+    a drawn graph is taller than a list of its node names: each node is a box, and
+    each level a row of them, so the same eight nodes occupy about twenty lines
+    instead of eight. On a terminal too short for the whole drawing the cap wins
+    and the bottom of it is cut off, which is the deliberate trade against the
+    input line being pushed away; a taller terminal shows all of it.
     """
 
     BINDINGS = [
@@ -150,6 +162,7 @@ class XGApp(App[None]):
         executor: Executor | None = None,
         runner: Callable[[str], Outcome] | None = None,
         editor: Callable[[EditProposal], EditOutcome] | None = None,
+        adder: Callable[[AddProposal], EditOutcome] | None = None,
         root: str | Path | None = None,
     ) -> None:
         super().__init__()
@@ -160,11 +173,13 @@ class XGApp(App[None]):
         # use, so xg opens and works with nothing configured.
         self.jev = jev if jev is not None else Jev()
         self.executor = executor if executor is not None else Executor()
-        # The command runner and the edit applier are injectable so a test can
-        # accept a proposal without starting a process or writing a file. Both are
-        # run in a thread so a slow one does not block the interface.
+        # The command runner, the edit applier and the file creator are
+        # injectable so a test can accept a proposal without starting a process
+        # or writing a file. All three run in a thread so a slow one does not
+        # block the interface.
         self.runner = runner if runner is not None else run_command
         self.editor = editor if editor is not None else self._apply_edit
+        self.adder = adder if adder is not None else self._apply_add
         self.root = Path(root) if root is not None else Path.cwd()
         self.gate: Gate | None = None
         """The proposal awaiting accept or reject, or ``None`` when nothing is."""
@@ -278,18 +293,24 @@ class XGApp(App[None]):
     def refresh_state(self) -> None:
         """Redraw both panes from the session.
 
-        The graph pane gets the tree, the node the run is on, and the trail; the
+        The graph pane gets the graph, the node the run is on, and the trail; the
         state pane gets the state and nothing else. Keeping the trail with the
-        tree is what stops the "where am I" half of the display from scrolling
+        graph is what stops the "where am I" half of the display from scrolling
         away — the state is the only pane with a scrollbar, so anything that
         belongs to the other half has to live there.
+
+        The drawing is bounded to the pane's own width rather than to a constant,
+        so the layout engine can shorten its boxes to fit instead of letting the
+        right-hand column of nodes fall off the edge.
         """
         session = self.session
         node = session.node
         self.query_one(f"#{GRAPH_ID}", Static).update(
             "\n".join(
                 [
-                    session.graph.render_tree(session.position),
+                    session.graph.render_graph(
+                        session.position, max_width=max(20, self.size.width - 4)
+                    ),
                     f"[b]you are at[/b] [b cyan]{escape(node.name)}[/b cyan] "
                     f"[dim]· {escape(node.summary)}[/dim]",
                     f"[dim]trail:[/dim] {escape(' → '.join(session.trail))}",
@@ -591,18 +612,20 @@ class XGApp(App[None]):
         self.run_worker(self._accept_proposal(gate), group="action", exclusive=True)
 
     async def _accept_proposal(self, gate: Gate) -> None:
-        """Carry out the proposal: a command or an edit, in a thread."""
+        """Carry out the proposal: a command, an edit or an addition, in a thread."""
         proposal = gate.proposal
-        if isinstance(proposal, EditProposal):
+        if isinstance(proposal, AddProposal):
+            action, argument = self.adder, proposal
+        elif isinstance(proposal, EditProposal):
             action, argument = self.editor, proposal
         elif isinstance(proposal, CommandProposal):
             action, argument = self.runner, proposal.command or ""
-        else:  # pragma: no cover - every proposing node yields one of the two
+        else:  # pragma: no cover - every proposing node yields one of the three
             self.set_status("[red]the pending proposal cannot be carried out[/red]")
             return
 
-        # A command or an edit runs in a thread; either can take a while, so the
-        # wait is drawn the same way a model call is.
+        # A command, an edit or an addition runs in a thread; any of them can take
+        # a while, so the wait is drawn the same way a model call is.
         self.set_busy(True)
         try:
             outcome: object = await asyncio.to_thread(action, argument)
@@ -627,6 +650,15 @@ class XGApp(App[None]):
     def _apply_edit(self, proposal: EditProposal) -> EditOutcome:
         """The default editor: write the edit into the file, relative to the root."""
         return apply_edit(proposal, root=self.root)
+
+    def _apply_add(self, proposal: AddProposal) -> EditOutcome:
+        """The default adder: create the new file, relative to the root.
+
+        Separate from ``_apply_edit`` because creating a file is not an edit, and
+        the rule that makes it safe is the opposite one: an edit must match what
+        is there, an addition must find nothing there.
+        """
+        return apply_add(proposal, root=self.root)
 
     def describe_outcome(self, outcome: object) -> str:
         """The status line for an accepted proposal's result."""

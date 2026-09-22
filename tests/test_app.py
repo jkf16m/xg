@@ -36,9 +36,19 @@ from xg_project.app import (
     XGApp,
 )
 from xg_project.edit import EditOutcome
-from xg_project.graph import ANSWER, COMMAND, EDIT, FILTER, ORIGIN, SELECT_MODULE, SORT
+from xg_project.graph import (
+    ADD,
+    ANSWER,
+    COMMAND,
+    EDIT,
+    FILTER,
+    HERE,
+    ORIGIN,
+    SELECT_MODULE,
+    SORT,
+)
 from xg_project.jev import Jev
-from xg_project.llm import EditProposal, Executor
+from xg_project.llm import AddProposal, EditProposal, Executor
 from xg_project.shell import Outcome
 
 
@@ -66,6 +76,20 @@ class FakeEditor:
         if self.outcome is not None:
             return self.outcome
         return EditOutcome(path=proposal.path or "", applied=True)
+
+
+class FakeAdder:
+    """Stands in for `apply_add`, recording the proposals it was handed."""
+
+    def __init__(self, *, outcome: EditOutcome | None = None) -> None:
+        self.outcome = outcome
+        self.calls: list[AddProposal] = []
+
+    def __call__(self, proposal: AddProposal) -> EditOutcome:
+        self.calls.append(proposal)
+        if self.outcome is not None:
+            return self.outcome
+        return EditOutcome(path=proposal.path or "", applied=True, created=True)
 
 
 class BlockingJev(FakeJev):
@@ -111,6 +135,7 @@ def make_app(**overrides) -> XGApp:
         "executor": FakeExecutor(command="echo hi"),
         "runner": FakeRunner(),
         "editor": FakeEditor(),
+        "adder": FakeAdder(),
         "root": Path("/nonexistent-xyz"),
     }
     kwargs.update(overrides)
@@ -132,6 +157,18 @@ def lost_app() -> XGApp:
 
 def graph_text(app: XGApp) -> str:
     return app.query_one(f"#{GRAPH_ID}", Static).content
+
+
+def marked_node(app: XGApp) -> str:
+    """The line the drawing puts the where-you-are marker on, box and all.
+
+    The marker is drawn inside the current node's own box, so the node it is
+    about is the name on the line above it. Asserting that a name is somewhere on
+    screen would not distinguish the node the run is on from the seven it is not.
+    """
+    lines = graph_text(app).splitlines()
+    marked = next(index for index, line in enumerate(lines) if HERE in line)
+    return lines[marked - 1]
 
 
 def state_text(app: XGApp) -> str:
@@ -204,7 +241,7 @@ async def test_the_graph_panel_shows_the_whole_graph(app: XGApp, plain) -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         drawn = plain(graph_text(app))
-        for name in (ORIGIN, COMMAND, SELECT_MODULE, FILTER, SORT, EDIT, ANSWER):
+        for name in (ORIGIN, ADD, COMMAND, SELECT_MODULE, FILTER, SORT, EDIT, ANSWER):
             assert name in drawn
 
 
@@ -390,11 +427,11 @@ async def test_the_spinner_shows_while_an_accepted_command_runs() -> None:
 # -- routing ---------------------------------------------------------------
 
 
-async def test_a_prompt_at_the_origin_is_routed_by_jev(app: XGApp, plain) -> None:
+async def test_a_prompt_at_the_origin_is_routed_by_jev(app: XGApp) -> None:
     async with app.run_test() as pilot:
         await submit(app, pilot, "make the tests pass")
         assert app.session.position == COMMAND
-        assert f"◆ {COMMAND}" in plain(graph_text(app))
+        assert COMMAND in marked_node(app)
 
 
 async def test_the_move_is_reported_on_the_status_line(app: XGApp) -> None:
@@ -782,6 +819,116 @@ async def test_the_patch_appears_before_the_edit_is_accepted(edit_app: XGApp) ->
         await drive_to_edit(edit_app, pilot)
         assert (edit_app.root / "b.py").read_text(encoding="utf-8") == "y = 2\n"
         assert "+y = 42" in state_text(edit_app)
+
+
+# -- the add workflow ------------------------------------------------------
+
+
+@pytest.fixture
+def add_app(tmp_path: Path) -> XGApp:
+    """A request for a new file, answered by an addition from the origin."""
+    return make_app(
+        jev=FakeJev(choice=ADD),
+        executor=FakeExecutor(path="pkg/greet.py", content='def greet():\n    return "hi"\n'),
+        adder=None,
+        root=tmp_path,
+    )
+
+
+async def drive_to_add(app: XGApp, pilot) -> None:
+    """Move to ADD and run it, leaving its proposal pending."""
+    await submit(app, pilot, f"/go {ADD}")
+    await submit(app, pilot, "add a module that greets")
+
+
+async def test_a_new_file_request_reaches_the_add_node(add_app: XGApp) -> None:
+    async with add_app.run_test() as pilot:
+        await drive_to_add(add_app, pilot)
+        assert add_app.session.position == ADD
+        assert add_app.gate is not None
+        assert add_app.gate.proposal.path == "pkg/greet.py"
+        assert ADD in marked_node(add_app)
+
+
+async def test_a_pending_addition_is_previewed_as_a_creating_patch(add_app: XGApp) -> None:
+    """The patch says the file is new, because that is what accepting would do."""
+    async with add_app.run_test() as pilot:
+        await drive_to_add(add_app, pilot)
+
+        shown = state_text(add_app)
+        assert "diff --git a/pkg/greet.py b/pkg/greet.py" in shown
+        assert "new file mode 100644" in shown
+        assert "--- /dev/null" in shown
+        assert "+def greet():" in shown
+
+
+async def test_the_creating_patch_appears_before_acceptance(add_app: XGApp) -> None:
+    async with add_app.run_test() as pilot:
+        await drive_to_add(add_app, pilot)
+        assert not (add_app.root / "pkg/greet.py").exists()
+        assert "new file mode" in state_text(add_app)
+
+
+async def test_accepting_an_addition_creates_the_file(add_app: XGApp) -> None:
+    """The default adder is real: accepting creates the file, nested directory and all."""
+    async with add_app.run_test() as pilot:
+        await drive_to_add(add_app, pilot)
+        await pilot.press("ctrl+y")
+        await add_app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert (add_app.root / "pkg/greet.py").read_text(encoding="utf-8") == (
+            'def greet():\n    return "hi"\n'
+        )
+        assert add_app.gate is None
+        assert "created" in status_text(add_app)
+
+
+async def test_rejecting_an_addition_writes_nothing(add_app: XGApp) -> None:
+    async with add_app.run_test() as pilot:
+        await drive_to_add(add_app, pilot)
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        assert not (add_app.root / "pkg/greet.py").exists()
+        assert "rejected" in status_text(add_app)
+
+
+async def test_an_addition_is_refused_when_the_file_already_exists(tmp_path: Path) -> None:
+    """The one check a preview cannot make, since the file may appear while it waits."""
+    (tmp_path / "taken.py").write_text("already here\n", encoding="utf-8")
+    app = make_app(
+        jev=FakeJev(choice=ADD),
+        executor=FakeExecutor(path="taken.py", content="something else\n"),
+        adder=None,
+        root=tmp_path,
+    )
+    async with app.run_test() as pilot:
+        await drive_to_add(app, pilot)
+        await pilot.press("ctrl+y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert (tmp_path / "taken.py").read_text(encoding="utf-8") == "already here\n"
+        assert "already exists" in status_text(app)
+
+
+async def test_accepting_an_addition_goes_through_the_injected_adder(tmp_path: Path) -> None:
+    """An addition is dispatched to the adder, not to the editor or the runner."""
+    adder = FakeAdder()
+    app = make_app(
+        jev=FakeJev(choice=ADD),
+        executor=FakeExecutor(path="new.py", content="x = 1\n"),
+        adder=adder,
+        root=tmp_path,
+    )
+    async with app.run_test() as pilot:
+        await drive_to_add(app, pilot)
+        await pilot.press("ctrl+y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert [proposal.path for proposal in adder.calls] == ["new.py"]
+        assert not (tmp_path / "new.py").exists()
 
 
 # -- the answer workflow ---------------------------------------------------

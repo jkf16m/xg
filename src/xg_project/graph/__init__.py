@@ -16,6 +16,7 @@ LangGraph rather than the registry, and are not what the TUI runs:
 """
 
 from xg_project.graph._default import (
+    ADD,
     ANSWER,
     COMMAND,
     EDIT,
@@ -26,6 +27,7 @@ from xg_project.graph._default import (
     default_graph,
 )
 from xg_project.graph._registry import (
+    HERE,
     XG_PREFIX,
     Actor,
     Handler,
@@ -38,10 +40,12 @@ from xg_project.graph._registry import (
 )
 
 __all__ = [
+    "ADD",
     "ANSWER",
     "COMMAND",
     "EDIT",
     "FILTER",
+    "HERE",
     "ORIGIN",
     "SELECT_MODULE",
     "SORT",

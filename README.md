@@ -7,20 +7,37 @@ small graph of nodes — narrow the context to one module, filter the files that
 matter, rank them, then answer or propose an edit. Every decision that steers the
 run is made by a deterministic rule or by a *decision* model. A generative model
 is reached only at the very end, and only to fill in something concrete: an edit,
-a command, or a sentence.
+a new file, a command, or a sentence.
 
-Nothing that changes anything happens on its own. An edit or a command is shown
-as a proposal and waits for you.
+Nothing that changes anything happens on its own. An edit, a new file or a command
+is shown as a proposal and waits for you.
 
 ```
  ⭘                                              xg
-  ◆ _XG_ORIGIN  decision · origin  ← you are here
-  ├── ○ _XG_COMMAND  generative · leaf
-  └── ○ _XG_SELECT_MODULE  decision
-      └── ○ _XG_FILTER  decision
-          └── ○ _XG_SORT  decision
-              ├── ○ _XG_EDIT  generative · leaf
-              └── ○ _XG_ANSWER  generative · leaf
+                    ┌ origin ────────┐
+                    │   _XG_ORIGIN   │
+                    │ ◀ you are here │
+                    └───────┬┬───────┘
+        ┌───────────────────│└────────────────────┐
+        ▼                   ▼                     ▼
+┌ generative ──┐    ┌ generative ──┐    ┌ decision ─────────┐
+│   _XG_ADD    │    │ _XG_COMMAND  │    │ _XG_SELECT_MODULE │
+└──────────────┘    └──────────────┘    └─────────┬─────────┘
+                                                  │
+                                                  ▼
+                                           ┌ decision ──┐
+                                           │ _XG_FILTER │
+                                           └──────┬─────┘
+                                                  │
+                                                  ▼
+                                           ┌ decision ──┐
+                                           │  _XG_SORT  │
+                                           └──────┬─────┘
+                                        ┌─────────└─────────┐
+                                        ▼                   ▼
+                                ┌ generative ──┐    ┌ generative ──┐
+                                │  _XG_ANSWER  │    │   _XG_EDIT   │
+                                └──────────────┘    └──────────────┘
   you are at _XG_ORIGIN · Where a run starts: records the user's request as the goal.
   trail: _XG_ORIGIN
 ──────────────────────────────────────────────────────────────────────────────────
@@ -34,10 +51,17 @@ as a proposal and waits for you.
     @@ -214,3 +214,6 @@
 ```
 
-The display is two windows that answer two questions. The **tree** (with the
+The display is two windows that answer two questions. The **graph** (with the
 trail, and the current node's own description) is "where can I go". The **state**
 is "where am I and what do I know", keyed by the node that introduced each piece.
 Only the state scrolls, so where you are can never be scrolled out of sight.
+
+The graph is drawn as a graph rather than as a tree, because it is one: a node
+may be the child of two others, and a node may lead back to one of its own
+ancestors. Every edge is handed to [graphtty](https://pypi.org/project/graphtty/),
+whose layout routes a back edge up the side of the diagram — a tree drawing would
+show a shared node under one parent and lose the other edge, and would have to
+decide what a cycle means before it could finish at all.
 
 There is no log of actions to read past. What each node produced *is* the state.
 
@@ -73,7 +97,9 @@ Type a line and press Enter. What a line means depends on its first character.
 
 **A prompt** is free text: it is the goal, and it walks the workflow one node per
 prompt. So `make the retry loop stop on a 4xx` reaches `_XG_FILTER`, and the next
-line you type continues from there.
+line you type continues from there. A request that names a new file — `add a
+CHANGELOG` — is routed to `_XG_ADD` instead, which shows you the file it would
+create and waits for `ctrl+y`.
 
 **A command** starts with `/` and is answered by the interface itself — no model
 is asked anything.
@@ -106,6 +132,7 @@ and branches.
 
 ```
 _XG_ORIGIN ─┬─ _XG_COMMAND
+            ├─ _XG_ADD
             └─ _XG_SELECT_MODULE ─ _XG_FILTER ─ _XG_SORT ─┬─ _XG_EDIT
                                                           └─ _XG_ANSWER
 ```
@@ -113,15 +140,21 @@ _XG_ORIGIN ─┬─ _XG_COMMAND
 | Node | What it does |
 | --- | --- |
 | `_XG_ORIGIN` | Records the goal. Jev chooses the branch. |
-| `_XG_COMMAND` | Proposes one shell command, with no project context at all. |
+| `_XG_COMMAND` | Proposes one shell command, with no project context at all. Gated. |
+| `_XG_ADD` | Proposes one new file — a path that does not exist yet, and its whole content. Gated. |
 | `_XG_SELECT_MODULE` | Finds the context module the request belongs to and bounds the read to it. |
 | `_XG_FILTER` | Reads what is in scope, then asks Jev once per file whether it is relevant. |
 | `_XG_SORT` | Ranks what survived, most important first, and Jev picks the leaf. |
 | `_XG_EDIT` | Proposes one edit to the top-ranked file. Gated. |
 | `_XG_ANSWER` | Answers in prose from the ranked files. Not gated — reading changes nothing. |
 
+`_XG_COMMAND` and `_XG_ADD` are self-contained: the request says what to do and
+there is nothing in the project to consult, so they hang directly off the origin.
+The project workflow is the one that reads, which is why it is the one with
+several steps.
+
 A node with one child is taken without asking. Jev is consulted only where the
-graph actually branches, and it may only ever descend: the tree is a workflow you
+graph actually branches, and it may only ever descend: the graph is a workflow you
 can walk, not a state you can wander.
 
 ## How decisions are made
@@ -144,9 +177,11 @@ set so the request cannot be routed to a backend that ignores that.
 
 **Proposals are held.** A gated leaf shows what it would do and stops. `_XG_EDIT`
 is previewed as a real git patch, built against the content the model was shown,
-and `git apply` accepts it. The write itself re-reads the file and refuses an
-ambiguous or stale match, so a preview that has gone out of date cannot become a
-wrong write.
+and `git apply` accepts it. `_XG_ADD` is previewed as a creation patch —
+`new file mode`, `/dev/null` on the from side — so what you read is the file being
+added. The write itself re-reads the file and refuses an ambiguous or stale match,
+so a preview that has gone out of date cannot become a wrong write; an add
+refuses a path that turns out to exist, rather than overwriting it.
 
 ## Context modules
 

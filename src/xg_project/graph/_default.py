@@ -4,7 +4,7 @@ Every node is named through :func:`~xg_project.graph._registry.xg`, so the
 built-in keys are ``_XG_ORIGIN``, ``_XG_FILTER``, and so on. A node a user adds
 does not carry the prefix, which is how the two are told apart.
 
-The graph is two workflows that share an origin.
+The graph is three workflows that share an origin.
 
 ``_XG_ORIGIN``
     The origin, and a decision node. The user states the goal here; the node
@@ -55,6 +55,19 @@ with no project context at all:
     A generative leaf. The executor proposes one shell command, which the user
     accepts or rejects before anything runs.
 
+**The add workflow**, ``_XG_ORIGIN -> _XG_ADD``, creates a new file, also with no
+project context:
+
+``_XG_ADD``
+    A generative leaf. The executor proposes a new file — a path that does not
+    exist yet, and the whole content for it — as a forced tool call. That is a
+    proposal: nothing is created until the user accepts, and a path that already
+    exists is refused rather than overwritten.
+
+Both of those are self-contained: the request says what to do and there is
+nothing in the project to consult about it. The project workflow is the one that
+reads, which is why it is the one with several steps.
+
 Every summary describes what its node *does*. None of them says when to route to
 it: a node does not know who links to it, and a description written for one
 parent is wrong for the next. Jev is shown those descriptions and decides by
@@ -79,12 +92,13 @@ from xg_project.jev import (
     MODULE_CRITERIA,
     MODULE_INSTRUCTIONS,
 )
-from xg_project.llm import Answer, CommandProposal, EditProposal
+from xg_project.llm import AddProposal, Answer, CommandProposal, EditProposal
 from xg_project.module import Module, Modules, Scope, discover, scope
 from xg_project.read import read_tree
 
 ORIGIN = xg("ORIGIN")
 COMMAND = xg("COMMAND")
+ADD = xg("ADD")
 SELECT_MODULE = xg("SELECT_MODULE")
 FILTER = xg("FILTER")
 SORT = xg("SORT")
@@ -220,6 +234,20 @@ async def _command(inp: NodeInput) -> CommandProposal:
     return await inp.executor.propose_command(prompt=inp.prompt, context=_context(inp))
 
 
+async def _add(inp: NodeInput) -> AddProposal:
+    """Ask the executor for one new file, and introduce it as a proposal.
+
+    No files are read and the state is not consulted, for the same reason COMMAND
+    does not read anything: the request is self-contained. The file being asked
+    for is one that does not exist yet, so there is nothing in the project to read
+    about it — the path is the model's to choose, and the workflow's only job is
+    to hold the result until the user decides.
+    """
+    if inp.executor is None:
+        return AddProposal(problem="no executor is attached, so no file can be proposed")
+    return await inp.executor.propose_add(prompt=inp.prompt, context=_context(inp))
+
+
 async def _filter(inp: NodeInput) -> dict[str, object]:
     """Ignore deterministically, then ask Jev which surviving files are relevant.
 
@@ -246,7 +274,6 @@ async def _filter(inp: NodeInput) -> dict[str, object]:
             "problem": "no project root is configured",
         }
 
-    tree = read_tree(inp.root, include=_bound_files(inp.state.get(SELECT_MODULE)))
     tree = read_tree(inp.root, include=_bound_files(inp.state.get(SELECT_MODULE)))
     read = len(tree.files)
     if not tree.files:
@@ -386,8 +413,24 @@ def default_graph() -> Registry:
                 "Where a run starts: records the user's request as the goal. "
                 "Nothing is read and nothing runs here."
             ),
-            children=(COMMAND, SELECT_MODULE),
+            children=(COMMAND, ADD, SELECT_MODULE),
             handle=_origin,
+        )
+    )
+    registry.add(
+        NodeDeclaration(
+            name=ADD,
+            level=1,
+            kind=NodeKind.GENERATIVE,
+            summary=(
+                "Adds one new file to the project: it proposes a path that does "
+                "not exist yet, together with the whole content for it. It reads "
+                "nothing from the project and cannot change a file that is "
+                "already there; it is for a request that explicitly asks for a "
+                "new file to be created."
+            ),
+            handle=_add,
+            proposes=True,
         )
     )
     registry.add(

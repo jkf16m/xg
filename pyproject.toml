@@ -29,6 +29,13 @@ classifiers = [
 dependencies = [
     "textual>=8.2",
     "rich>=15",
+    # The node graph is drawn, not listed: `Registry.render_graph` hands every
+    # node and every edge to graphtty, whose Sugiyama layout is what knows how to
+    # route an edge that points back up at an ancestor. A tree rendering cannot
+    # show a node with two parents or a cycle at all. Chosen over the alternatives
+    # because it is pure Python with no dependencies of its own, so it adds a
+    # renderer to a terminal application without adding anything else.
+    "graphtty>=0.1.8",
     # LangGraph builds the decision tree: `xg_project.graph.langgraph_tree`
     # declares nodes and branches, then compiles once after every extension has
     # registered. Pinned to 1.x for the `StateGraph`/`START`/`END` API this code

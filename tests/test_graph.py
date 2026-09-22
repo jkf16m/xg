@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 
 from xg_project.graph import (
+    ADD,
     ANSWER,
     COMMAND,
     EDIT,
     FILTER,
+    HERE,
     ORIGIN,
     SELECT_MODULE,
     SORT,
@@ -28,7 +30,7 @@ def graph() -> Registry:
     return default_graph()
 
 
-ALL_NODES = [ORIGIN, COMMAND, SELECT_MODULE, FILTER, SORT, EDIT, ANSWER]
+ALL_NODES = [ORIGIN, ADD, COMMAND, SELECT_MODULE, FILTER, SORT, EDIT, ANSWER]
 
 
 #: Words that turn a node's own description into an instruction to its parent.
@@ -36,10 +38,12 @@ ALL_NODES = [ORIGIN, COMMAND, SELECT_MODULE, FILTER, SORT, EDIT, ANSWER]
 ROUTING_ADVICE = ("pick this", "pick it", "use this when", "choose this when")
 
 
-def test_default_graph_has_the_seven_built_in_nodes(graph: Registry) -> None:
-    # Sorted by genericity then name, so the two level-4 leaves sort as ANSWER, EDIT.
+def test_default_graph_has_the_eight_built_in_nodes(graph: Registry) -> None:
+    # Sorted by genericity then name, so the level-1 nodes sort ADD, COMMAND,
+    # SELECT_MODULE and the two level-4 leaves sort as ANSWER, EDIT.
     assert [n.name for n in graph.sorted()] == [
         ORIGIN,
+        ADD,
         COMMAND,
         SELECT_MODULE,
         FILTER,
@@ -78,6 +82,41 @@ def test_command_is_reached_from_the_origin(graph: Registry) -> None:
     assert graph.ancestors(COMMAND) == [ORIGIN, COMMAND]
 
 
+def test_add_is_reached_from_the_origin(graph: Registry) -> None:
+    assert graph.ancestors(ADD) == [ORIGIN, ADD]
+
+
+def test_the_add_node_creates_a_file_rather_than_changing_one(graph: Registry) -> None:
+    """A leaf, gated, and described as the creation of something not there yet.
+
+    "Does not exist yet" is what keeps it apart from EDIT: both write a file, and
+    only one of them is the answer to being asked for an edit.
+    """
+    node = graph.get(ADD)
+    assert node.kind is NodeKind.GENERATIVE
+    assert node.proposes is True
+    assert node.children == ()
+    assert "new file" in node.summary
+    assert "does not exist yet" in node.summary
+
+
+def test_edges_are_every_declared_successor(graph: Registry) -> None:
+    """Edges are read off the declarations, so they cannot disagree with them.
+
+    Ordered by the parent's genericity, so a drawing made from them is stable and
+    the node a reader looks for keeps its place between runs.
+    """
+    assert graph.edges() == [
+        (ORIGIN, ADD),
+        (ORIGIN, COMMAND),
+        (ORIGIN, SELECT_MODULE),
+        (SELECT_MODULE, FILTER),
+        (FILTER, SORT),
+        (SORT, ANSWER),
+        (SORT, EDIT),
+    ]
+
+
 def test_the_edit_path_is_origin_module_filter_sort_edit(graph: Registry) -> None:
     assert graph.ancestors(EDIT) == [ORIGIN, SELECT_MODULE, FILTER, SORT, EDIT]
 
@@ -103,19 +142,21 @@ def test_the_origin_is_a_decision_node(graph: Registry) -> None:
 
 def test_the_edit_leaves_are_generative_nodes(graph: Registry) -> None:
     assert graph.get(COMMAND).kind is NodeKind.GENERATIVE
+    assert graph.get(ADD).kind is NodeKind.GENERATIVE
     assert graph.get(EDIT).kind is NodeKind.GENERATIVE
     assert graph.get(ANSWER).kind is NodeKind.GENERATIVE
+
+
+def test_the_gated_leaves_propose_an_action_the_user_must_confirm(graph: Registry) -> None:
+    assert graph.get(COMMAND).proposes is True
+    assert graph.get(ADD).proposes is True
+    assert graph.get(EDIT).proposes is True
 
 
 def test_the_file_steps_are_decision_nodes(graph: Registry) -> None:
     """Filter and sort work, then hand the run to their single child."""
     assert graph.get(FILTER).kind is NodeKind.DECISION
     assert graph.get(SORT).kind is NodeKind.DECISION
-
-
-def test_the_gated_leaves_propose_a_command_the_user_must_confirm(graph: Registry) -> None:
-    assert graph.get(COMMAND).proposes is True
-    assert graph.get(EDIT).proposes is True
 
 
 def test_the_file_steps_do_not_propose(graph: Registry) -> None:
@@ -134,7 +175,7 @@ def test_only_a_generative_node_may_propose() -> None:
 
 
 def test_options_are_the_children_of_the_current_node(graph: Registry) -> None:
-    assert set(graph.options(ORIGIN)) == {COMMAND, SELECT_MODULE}
+    assert set(graph.options(ORIGIN)) == {ADD, COMMAND, SELECT_MODULE}
 
 
 def test_the_module_step_sits_above_the_file_steps(graph: Registry) -> None:
@@ -179,12 +220,6 @@ def test_options_exclude_a_move_the_policy_would_refuse() -> None:
 def test_options_text_is_the_summary(graph: Registry) -> None:
     """The criteria text is the model's only input, so it is the node's summary."""
     assert graph.options(ORIGIN)[COMMAND] == graph.get(COMMAND).summary
-
-
-def test_the_tree_shows_each_nodes_kind(graph: Registry) -> None:
-    tree = graph.render_tree(ORIGIN)
-    assert "decision" in tree
-    assert "generative" in tree
 
 
 # -- movement policy -------------------------------------------------------
@@ -275,13 +310,22 @@ def test_unreachable_node_is_an_error() -> None:
         registry.ancestors("orphan")
 
 
-def test_a_parent_cycle_is_an_error_not_a_hang() -> None:
+def test_a_cycle_is_walked_not_refused() -> None:
+    """A node leading back to an ancestor is a configuration, not a defect.
+
+    The path is the shortest one, and that is what makes a cycle terminate: `b`
+    is reached from the origin in two steps through `a`, so the edge back from
+    `b` is never needed to say where the run is standing.
+    """
     registry = Registry()
     registry.add(NodeDeclaration(name="none", level=0, summary="x", children=("a",)))
     registry.add(NodeDeclaration(name="a", level=1, summary="y", children=("b",)))
     registry.add(NodeDeclaration(name="b", level=2, summary="z", children=("a",)))
-    with pytest.raises(ValueError, match="cycle"):
-        registry.ancestors("b")
+    assert registry.ancestors("b") == ["none", "a", "b"]
+    # `b` also leads back to `a`, and is not the answer: the shortest route wins,
+    # so ``/go ..`` agrees with the trail instead of being a second opinion on it.
+    assert registry.parent("a") == "none"
+    assert registry.parents()["a"] == ("none", "b")
 
 
 # -- parents ---------------------------------------------------------------
@@ -310,14 +354,60 @@ def test_parent_of_an_unknown_node_raises(graph: Registry) -> None:
 # -- rendering -------------------------------------------------------------
 
 
-def test_tree_marks_the_current_node(graph: Registry, plain) -> None:
-    drawn = plain(graph.render_tree(FILTER))
-    assert f"◆ {FILTER}" in drawn
-    assert "← you are here" in drawn
-    assert f"○ {ORIGIN}" in drawn
-    assert "origin" in drawn
+def test_the_drawing_names_every_node_and_its_kind(graph: Registry) -> None:
+    drawn = graph.render_graph(ORIGIN)
+    for node in graph.sorted():
+        assert node.name in drawn
+    assert "decision" in drawn
+    assert "generative" in drawn
 
 
-def test_tree_is_stable_across_calls(graph: Registry) -> None:
+def test_the_drawing_labels_the_origin_as_the_origin(graph: Registry) -> None:
+    """Its kind says decision; what a reader needs to know is that it is the start."""
+    assert "origin" in graph.render_graph(FILTER)
+
+
+def test_the_drawing_marks_the_current_node_inside_its_own_box(graph: Registry) -> None:
+    """The marker has to be next to the node it is about, not merely on screen."""
+    lines = graph.render_graph(FILTER).splitlines()
+    marked = next(index for index, line in enumerate(lines) if HERE in line)
+    assert FILTER in lines[marked - 1]
+
+
+def test_the_drawing_marks_only_the_current_node(graph: Registry) -> None:
+    assert graph.render_graph(FILTER).count(HERE) == 1
+
+
+def test_the_drawing_is_stable_across_calls(graph: Registry) -> None:
     """Rendering is a pure function of graph and position."""
-    assert graph.render_tree(ORIGIN) == graph.render_tree(ORIGIN)
+    assert graph.render_graph(ORIGIN) == graph.render_graph(ORIGIN)
+
+
+def test_rendering_an_unknown_node_raises(graph: Registry) -> None:
+    with pytest.raises(UnknownNode):
+        graph.render_graph("nope")
+
+
+def test_the_drawing_holds_a_node_with_two_parents_and_a_cycle() -> None:
+    """The two things a tree drawing cannot do, which is why this is not one.
+
+    A walk over successors would draw ``shared`` under whichever parent reached
+    it first and lose the other edge, and would have to decide what the cycle
+    means before it could finish. Every edge goes to the layout engine instead,
+    and the edge back up is drawn up the side of the diagram.
+    """
+    registry = Registry()
+    registry.add(NodeDeclaration(name="none", level=0, summary="x", children=("a", "b")))
+    registry.add(NodeDeclaration(name="a", level=1, summary="y", children=("shared",)))
+    registry.add(NodeDeclaration(name="b", level=2, summary="z", children=("shared",)))
+    registry.add(NodeDeclaration(name="shared", level=3, summary="w", children=("a",)))
+
+    assert registry.parents()["shared"] == ("a", "b")
+
+    drawn = registry.render_graph("none")
+    # Exactly one mark for the current node, and at least one arrow that is not
+    # it: the edge routed back up the side to an ancestor.
+    assert drawn.count(HERE) == 1
+    assert drawn.count("◀") > drawn.count(HERE)
+    for name in ("none", "a", "b", "shared"):
+        assert name in drawn
