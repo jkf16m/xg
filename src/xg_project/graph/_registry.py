@@ -32,6 +32,13 @@ walked parent by parent would need a cycle check before it could terminate, and
 would then have to decide what a cycle means — a shortest path needs no answer,
 because a node already reached is never expanded twice.
 
+**The drawing is bounded in height, not width.** The input line and the state
+share the screen with it, so a diagram whose height grows with the workflow
+would eventually push the two things a run is made of off the bottom. It draws
+from the current node downward and counts the rest, which is also the more
+useful half: what is above has already been walked, and what is below is what a
+move can still be made into.
+
 Levels are genericity. Level 0 is the origin, the most generic node; deeper
 nodes are more specific. "Up" always means toward the origin, and "down" always
 means away from it.
@@ -50,8 +57,6 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from graphtty import RenderOptions, render
-
 if TYPE_CHECKING:  # annotations only, so the registry stays free of the drivers
     from xg_project.jev import Jev
     from xg_project.llm import Executor
@@ -59,9 +64,9 @@ if TYPE_CHECKING:  # annotations only, so the registry stays free of the drivers
 HERE = "◀ you are here"
 """How the drawing marks the node the run is standing on.
 
-A line inside the node's own box rather than a colour or a symbol beside it: the
-drawing is a string, and a marker that still says what it meant after being
-logged or pasted somewhere is worth more than one that does not.
+Written out on the node's own line rather than shown as a colour or a bare
+symbol: the drawing is a string, and a marker that still says what it meant
+after being logged or pasted somewhere is worth more than one that does not.
 """
 
 XG_PREFIX = "_XG_"
@@ -337,10 +342,7 @@ class Registry:
         """
         self.get(name)
         origin = self.origin.name
-
-        successors: dict[str, list[str]] = {node.name: [] for node in self._nodes.values()}
-        for parent, child in self.edges():
-            successors[parent].append(child)
+        successors = self._successors()
 
         came_from: dict[str, str] = {origin: origin}
         queue: deque[str] = deque([origin])
@@ -382,44 +384,124 @@ class Registry:
             return f"only the user moves {direction}"
         return None
 
-    def render_graph(self, current: str, *, max_width: int | None = None) -> str:
-        """The whole graph drawn as a graph, with ``current`` marked.
+    def _successors(self) -> dict[str, list[str]]:
+        """Each node's children in declaration order, indexed by name.
 
-        Every edge is handed to the layout engine, because a traversal is a
-        statement about trees: walking ``children`` from the origin would draw a
-        node with two parents under only one of them, and would have to decide
-        what to do about a cycle before it could finish at all. The registry's
-        edges are what the drawing is made of, so what is shown cannot disagree
-        with what the movement rules allow.
+        The successor lists read as a lookup, which is what every walk over the
+        graph wants first and none of them should each build.
+        """
+        out: dict[str, list[str]] = {node.name: [] for node in self._nodes.values()}
+        for parent, child in self.edges():
+            out[parent].append(child)
+        return out
 
-        ``max_width`` bounds the drawing horizontally. The engine re-renders with
-        shortened text to fit, rather than truncating the right-hand edge, which
-        would take the boxes there with it.
+    def _descend(self, current: str) -> tuple[list[str], dict[str, str | None]]:
+        """Everything reachable from ``current``, breadth-first.
+
+        Returns the nodes in breadth-first order and the node each was first
+        reached from. Breadth-first gives the two things the compact drawing
+        needs: the order is already the order by distance, so truncating the tail
+        drops the farthest nodes first, and a node reached twice is never
+        expanded twice, so a cycle ends the walk instead of continuing it.
+        """
+        successors = self._successors()
+        order = [current]
+        came_from: dict[str, str | None] = {current: None}
+        queue = deque([current])
+
+        while queue:
+            node = queue.popleft()
+            for child in successors[node]:
+                if child in came_from:
+                    continue
+                came_from[child] = node
+                order.append(child)
+                queue.append(child)
+
+        return order, came_from
+
+    def render_graph(
+        self,
+        current: str,
+        *,
+        max_width: int | None = None,
+        max_lines: int = 10,
+    ) -> str:
+        """The graph from ``current`` onward, one line per node, ``current`` marked.
+
+        Walking only forward is what keeps this small: what a run has already
+        passed through is not on the way anywhere, so the nodes above
+        ``current`` are left out of the drawing rather than scrolled past. What
+        is drawn is the part of the graph that is still reachable, which is the
+        part a movement can still be made into.
+
+        It is still the graph and not a tree. A node is drawn under the node
+        that reached it first, and every other edge into it is named on its own
+        line — so a second parent and an edge that closes a cycle both stay
+        visible, at no cost in height. A traversal that silently dropped them
+        would be describing a different graph from the one the movement rules
+        allow. The one exception is ``current`` itself: naming what leads back
+        into it would undo the focus.
+
+        The drawing is bounded by lines rather than by columns because height is
+        the scarce axis here: the input line and the state share the screen, and
+        a diagram that grows with the workflow eventually pushes them off it.
+        Nodes past ``max_lines`` are counted in the last line instead of drawn,
+        and because the order is breadth-first it is the farthest ones that are
+        counted first.
+
+        ``max_width`` bounds a line by columns. An overlong line loses its
+        annotation and then its tail rather than wrapping, since a wrapped line
+        costs the height this method exists to conserve.
         """
         self.get(current)
-        origin = self.origin.name
-        drawing = {
-            "nodes": [self._drawn_node(node, current=current, origin=origin) for node in self.sorted()],
-            "edges": [
-                {"source": parent, "target": child} for parent, child in self.edges()
-            ],
-        }
-        return render(drawing, RenderOptions(max_width=max_width))
+        order, came_from = self._descend(current)
+        budget = max(1, max_lines)
 
-    def _drawn_node(
-        self, node: NodeDeclaration, *, current: str, origin: str
-    ) -> dict[str, str]:
-        """One node in the shape the layout engine takes.
+        hidden = max(0, len(order) - budget)
+        shown = order[: budget - (1 if hidden else 0)]
+        allowed = set(shown)
 
-        The type label is the node's kind, except at the origin, which gets a
-        label of its own: "where a run starts" is the one thing about the origin
-        worth reading that its kind does not say.
-        """
-        drawn = {
-            "id": node.name,
-            "name": node.name,
-            "type": "origin" if node.name == origin else node.kind.value,
-        }
-        if node.name == current:
-            drawn["description"] = HERE
-        return drawn
+        children: dict[str, list[str]] = {name: [] for name in shown}
+        for node in shown:
+            parent = came_from[node]
+            if parent in allowed:
+                children[parent].append(node)
+
+        other: dict[str, list[str]] = {}
+        for parent, child in self.edges():
+            # Edges into ``current`` are the ancestors, which are deliberately
+            # left out; naming them would put back the thing the focus removed.
+            if child != current and child in allowed and came_from.get(child) != parent:
+                other.setdefault(child, []).append(parent)
+
+        def decorate(name: str) -> str:
+            text = f"{name} {HERE}" if name == current else name
+            others = sorted(other.get(name, ()))
+            if others:
+                text += f" (also from {', '.join(others)})"
+            return text
+
+        lines: list[str] = []
+        stack: list[tuple[str, list[bool]]] = [(current, [])]
+        while stack:
+            name, last_flags = stack.pop()
+            if last_flags:
+                stem = "".join(
+                    "   " if last else "│  " for last in last_flags[:-1]
+                )
+                text = stem + ("└─ " if last_flags[-1] else "├─ ") + decorate(name)
+            else:
+                text = decorate(name)
+
+            if max_width is not None and len(text) > max_width:
+                text = text[: max(0, max_width - 1)].rstrip() + "…"
+            lines.append(text)
+
+            kids = children.get(name, [])
+            for index in reversed(range(len(kids))):
+                stack.append((kids[index], [*last_flags, index == len(kids) - 1]))
+
+        if hidden:
+            lines.append(f"… {hidden} more below")
+        return "\n".join(lines)

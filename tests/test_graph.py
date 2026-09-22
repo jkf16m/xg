@@ -354,24 +354,31 @@ def test_parent_of_an_unknown_node_raises(graph: Registry) -> None:
 # -- rendering -------------------------------------------------------------
 
 
-def test_the_drawing_names_every_node_and_its_kind(graph: Registry) -> None:
+def test_the_drawing_names_every_node_reachable_from_where_you_are(graph: Registry) -> None:
     drawn = graph.render_graph(ORIGIN)
     for node in graph.sorted():
         assert node.name in drawn
-    assert "decision" in drawn
-    assert "generative" in drawn
 
 
-def test_the_drawing_labels_the_origin_as_the_origin(graph: Registry) -> None:
-    """Its kind says decision; what a reader needs to know is that it is the start."""
-    assert "origin" in graph.render_graph(FILTER)
+def test_the_drawing_leaves_out_the_nodes_already_walked(graph: Registry) -> None:
+    """What is above is not on the way anywhere; what is below is still reachable."""
+    drawn = graph.render_graph(FILTER)
+    assert FILTER in drawn
+    assert SORT in drawn
+    assert ORIGIN not in drawn
+    assert SELECT_MODULE not in drawn
 
 
-def test_the_drawing_marks_the_current_node_inside_its_own_box(graph: Registry) -> None:
-    """The marker has to be next to the node it is about, not merely on screen."""
+def test_the_drawing_starts_at_the_current_node(graph: Registry) -> None:
+    assert graph.render_graph(FILTER).splitlines()[0].startswith(FILTER)
+
+
+def test_the_drawing_marks_the_current_node_on_its_own_line(graph: Registry) -> None:
+    """The marker has to be on the node it is about, not merely on screen."""
     lines = graph.render_graph(FILTER).splitlines()
-    marked = next(index for index, line in enumerate(lines) if HERE in line)
-    assert FILTER in lines[marked - 1]
+    marked = [line for line in lines if HERE in line]
+    assert len(marked) == 1
+    assert marked[0].startswith(FILTER)
 
 
 def test_the_drawing_marks_only_the_current_node(graph: Registry) -> None:
@@ -388,13 +395,64 @@ def test_rendering_an_unknown_node_raises(graph: Registry) -> None:
         graph.render_graph("nope")
 
 
-def test_the_drawing_holds_a_node_with_two_parents_and_a_cycle() -> None:
-    """The two things a tree drawing cannot do, which is why this is not one.
+def test_the_drawing_fits_the_line_budget(graph: Registry) -> None:
+    """Height is the scarce axis: the input line and the state need the rest."""
+    assert len(graph.render_graph(ORIGIN).splitlines()) <= 10
+
+
+def test_a_graph_deeper_than_the_budget_is_counted_not_drawn() -> None:
+    registry = Registry()
+    registry.add(NodeDeclaration(name="n0", level=0, summary="s", children=("n1",)))
+    for index in range(1, 20):
+        registry.add(
+            NodeDeclaration(
+                name=f"n{index}",
+                level=index,
+                summary="s",
+                children=((f"n{index + 1}",) if index < 19 else ()),
+            )
+        )
+
+    drawn = registry.render_graph("n0", max_lines=6).splitlines()
+    assert len(drawn) == 6
+    assert "n0" in drawn[0]
+    assert "more below" in drawn[-1]
+
+
+def test_the_budget_spends_itself_on_the_nearest_nodes() -> None:
+    """The order is by distance, so the count is always about the farthest away."""
+    registry = Registry()
+    registry.add(NodeDeclaration(name="n0", level=0, summary="s", children=("n1",)))
+    for index in range(1, 12):
+        registry.add(
+            NodeDeclaration(
+                name=f"n{index}",
+                level=index,
+                summary="s",
+                children=((f"n{index + 1}",) if index < 11 else ()),
+            )
+        )
+
+    drawn = registry.render_graph("n0", max_lines=4)
+    assert "n0" in drawn
+    assert "n1" in drawn
+    assert "n2" in drawn
+    assert "n3" not in drawn
+
+
+def test_a_long_line_is_shortened_rather_than_wrapped(graph: Registry) -> None:
+    """A wrapped line would cost the height the budget exists to protect."""
+    drawn = graph.render_graph(ORIGIN, max_width=24)
+    assert all(len(line) <= 24 for line in drawn.splitlines())
+
+
+def test_the_drawing_names_a_second_edge_into_a_node() -> None:
+    """The two things a tree drawing cannot do, at no cost in height.
 
     A walk over successors would draw ``shared`` under whichever parent reached
     it first and lose the other edge, and would have to decide what the cycle
-    means before it could finish. Every edge goes to the layout engine instead,
-    and the edge back up is drawn up the side of the diagram.
+    means before it could finish. Here the node is drawn once and every further
+    edge into it is named on its own line.
     """
     registry = Registry()
     registry.add(NodeDeclaration(name="none", level=0, summary="x", children=("a", "b")))
@@ -405,9 +463,21 @@ def test_the_drawing_holds_a_node_with_two_parents_and_a_cycle() -> None:
     assert registry.parents()["shared"] == ("a", "b")
 
     drawn = registry.render_graph("none")
-    # Exactly one mark for the current node, and at least one arrow that is not
-    # it: the edge routed back up the side to an ancestor.
-    assert drawn.count(HERE) == 1
-    assert drawn.count("◀") > drawn.count(HERE)
-    for name in ("none", "a", "b", "shared"):
-        assert name in drawn
+    lines = drawn.splitlines()
+
+    def drawn_name(line: str) -> str:
+        """The node a line is about, past its connector and any annotation."""
+        text = line.split("─ ", 1)[-1] if "─ " in line else line
+        return text.split(" ", 1)[0]
+
+    # Drawn once, not twice: a node is one line however many ways reach it.
+    assert sum(drawn_name(line) == "shared" for line in lines) == 1
+    # The second parent, and the edge that closes the cycle back to ``a``.
+    assert any(drawn_name(line) == "shared" and "b" in line for line in lines)
+    assert any(drawn_name(line) == "a" and "shared" in line for line in lines)
+
+
+def test_a_cycle_does_not_lengthen_a_line(graph: Registry) -> None:
+    """A node is expanded once, so a cycle ends the walk instead of repeating it."""
+    drawn = graph.render_graph(ORIGIN)
+    assert drawn.count(f"{SORT}\n") == 1

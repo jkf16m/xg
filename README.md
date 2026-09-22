@@ -14,30 +14,14 @@ is shown as a proposal and waits for you.
 
 ```
  ⭘                                              xg
-                    ┌ origin ────────┐
-                    │   _XG_ORIGIN   │
-                    │ ◀ you are here │
-                    └───────┬┬───────┘
-        ┌───────────────────│└────────────────────┐
-        ▼                   ▼                     ▼
-┌ generative ──┐    ┌ generative ──┐    ┌ decision ─────────┐
-│   _XG_ADD    │    │ _XG_COMMAND  │    │ _XG_SELECT_MODULE │
-└──────────────┘    └──────────────┘    └─────────┬─────────┘
-                                                  │
-                                                  ▼
-                                           ┌ decision ──┐
-                                           │ _XG_FILTER │
-                                           └──────┬─────┘
-                                                  │
-                                                  ▼
-                                           ┌ decision ──┐
-                                           │  _XG_SORT  │
-                                           └──────┬─────┘
-                                        ┌─────────└─────────┐
-                                        ▼                   ▼
-                                ┌ generative ──┐    ┌ generative ──┐
-                                │  _XG_ANSWER  │    │   _XG_EDIT   │
-                                └──────────────┘    └──────────────┘
+ _XG_ORIGIN ◀ you are here
+ ├─ _XG_ADD
+ ├─ _XG_COMMAND
+ └─ _XG_SELECT_MODULE
+    └─ _XG_FILTER
+       └─ _XG_SORT
+          ├─ _XG_ANSWER
+          └─ _XG_EDIT
   you are at _XG_ORIGIN · Where a run starts: records the user's request as the goal.
   trail: _XG_ORIGIN
 ──────────────────────────────────────────────────────────────────────────────────
@@ -58,10 +42,15 @@ Only the state scrolls, so where you are can never be scrolled out of sight.
 
 The graph is drawn as a graph rather than as a tree, because it is one: a node
 may be the child of two others, and a node may lead back to one of its own
-ancestors. Every edge is handed to [graphtty](https://pypi.org/project/graphtty/),
-whose layout routes a back edge up the side of the diagram — a tree drawing would
-show a shared node under one parent and lose the other edge, and would have to
-decide what a cycle means before it could finish at all.
+ancestors. Each node is drawn under the one that reached it first, and every
+other edge into it is named on that same line — so a shared node and a cycle both
+stay visible without costing a line. A tree drawing would show the shared node
+under one parent and silently lose the other edge.
+
+It draws **from where you are, downward**. The nodes above have already been
+walked and lead nowhere new, so leaving them out is what keeps the diagram
+small — and the whole thing is capped, counting the nodes it did not draw rather
+than growing until it pushes the input line off the screen.
 
 There is no log of actions to read past. What each node produced *is* the state.
 

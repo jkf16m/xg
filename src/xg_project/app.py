@@ -84,6 +84,15 @@ STATE_SCROLL_ID = "state-scroll"
 STATUS_ID = "status"
 BUSY_ID = "busy"
 
+GRAPH_LINES = 10
+"""How many lines the graph may be drawn in.
+
+A budget rather than a size, because the graph is a drawing of a workflow that
+can be as deep as somebody configures it to be, and the input line and the state
+pane have to stay on the screen regardless. Past the budget the drawing counts
+the nodes it did not draw, and because it is drawn from where the run is
+standing, those are the farthest ones.
+"""
 MAX_OUTPUT_LINES = 24
 """How much of an accepted command's output the status line will show."""
 
@@ -99,7 +108,7 @@ class XGApp(App[None]):
     }
     #graph {
         height: auto;
-        max-height: 70%;
+        max-height: 14;
         overflow: hidden;
         padding: 1 2 0 2;
     }
@@ -136,12 +145,11 @@ class XGApp(App[None]):
     The state pane is the only thing that scrolls, because it is the only thing
     that grows without bound.
 
-    The cap is a larger share than the old one-line-per-node tree needed, because
-    a drawn graph is taller than a list of its node names: each node is a box, and
-    each level a row of them, so the same eight nodes occupy about twenty lines
-    instead of eight. On a terminal too short for the whole drawing the cap wins
-    and the bottom of it is cut off, which is the deliberate trade against the
-    input line being pushed away; a taller terminal shows all of it.
+    The cap is a ceiling rather than the usual size: the graph renders itself in
+    at most `GRAPH_LINES` lines and counts the nodes it did not draw, so it never
+    reaches this on its own. It is here to hold the line if the pane's padding or
+    the terminal changes under it, because the one thing that must not happen is
+    the input line being pushed off the bottom.
     """
 
     BINDINGS = [
@@ -299,9 +307,9 @@ class XGApp(App[None]):
         away — the state is the only pane with a scrollbar, so anything that
         belongs to the other half has to live there.
 
-        The drawing is bounded to the pane's own width rather than to a constant,
-        so the layout engine can shorten its boxes to fit instead of letting the
-        right-hand column of nodes fall off the edge.
+        The drawing is bounded in both directions: to the pane's width by
+        columns, and to `GRAPH_LINES` by lines, because height is what the input
+        line and the state are competing for.
         """
         session = self.session
         node = session.node
@@ -309,7 +317,9 @@ class XGApp(App[None]):
             "\n".join(
                 [
                     session.graph.render_graph(
-                        session.position, max_width=max(20, self.size.width - 4)
+                        session.position,
+                        max_width=max(20, self.size.width - 4),
+                        max_lines=GRAPH_LINES,
                     ),
                     f"[b]you are at[/b] [b cyan]{escape(node.name)}[/b cyan] "
                     f"[dim]· {escape(node.summary)}[/dim]",
