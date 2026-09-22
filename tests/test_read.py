@@ -78,8 +78,13 @@ def test_the_git_directory_and_the_ignore_files_are_never_read(tmp_path: Path) -
     write(tmp_path, ".gitignore", "*.log\n")
     write(tmp_path, ".xgignore", "*.bak\n")
     write(tmp_path, ".git/HEAD", "ref: refs/heads/main\n")
+    # A vendored checkout or submodule carries its own .git directory. It is
+    # git's storage rather than project content, the same as the root one, and it
+    # is skipped wherever it appears rather than only at the root.
+    write(tmp_path, "vendor/.git/HEAD", "ref: refs/heads/main\n")
+    write(tmp_path, "vendor/lib.py", "l")
     write(tmp_path, "keep.py", "k")
-    assert set(read_tree(tmp_path).files) == {"keep.py"}
+    assert set(read_tree(tmp_path).files) == {"keep.py", "vendor/lib.py"}
 
 
 def test_a_binary_file_is_skipped_and_named(tmp_path: Path) -> None:
@@ -107,3 +112,22 @@ def test_content_is_the_file_itself_not_a_wrapper(tmp_path: Path) -> None:
     """The value is the direct content: no header, no line numbers, no JSON."""
     write(tmp_path, "a.py", "line one\nline two\n")
     assert read_tree(tmp_path).files["a.py"] == "line one\nline two\n"
+
+
+def test_this_projects_own_venv_and_caches_are_not_read() -> None:
+    """The reader against the repository it lives in.
+
+    .venv holds thousands of files and every __pycache__ holds a copy of a
+    source file; if the project's own .gitignore stopped applying, the context
+    would be mostly vendor code. This is the test that notices.
+    """
+    root = Path(__file__).resolve().parents[1]
+    tree = read_tree(root)
+    assert tree.files, "the repository should have readable files"
+    for path in tree.files:
+        assert not path.startswith(".venv/"), path
+        assert "__pycache__" not in path, path
+        assert not path.startswith(".pytest_cache/"), path
+        assert not path.startswith(".git/"), path
+        assert not path.endswith((".pyc", ".pyo")), path
+    assert not any(".venv" in entry for entry in tree.skipped)
