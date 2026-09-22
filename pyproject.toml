@@ -1,8 +1,31 @@
 [project]
 name = "xg"
 version = "0.1.0"
-description = "A TUI for deterministic agents"
+description = "A terminal agent for coding tasks that decides before it writes"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "klip" }]
+keywords = [
+    "tui",
+    "agent",
+    "llm",
+    "coding-agent",
+    "textual",
+    "langgraph",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: User Interfaces",
+]
 dependencies = [
     "textual>=8.2",
     "rich>=15",
@@ -26,7 +49,30 @@ dependencies = [
     # underneath, and `xg_project.llm` holds one connection open across
     # proposals the same way Jev holds its TypeSafe connection open.
     "httpx>=0.28",
+    # `xg_project.read` matches .gitignore and .xgignore with
+    # `pathspec.GitIgnoreSpec` rather than by hand, because gitignore syntax has
+    # enough corners (negation, anchoring, directory-only patterns) that a
+    # reimplementation is a bug farm. Under-declared until the wheel was built:
+    # it was present in the development environment transitively, so every test
+    # passed while a clean install could not import the package at all.
+    "pathspec>=0.12",
 ]
+
+[project.optional-dependencies]
+# Everything needed to run the suite, lint it, and build and check a release:
+# `pip install -e '.[dev]'`.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.6",
+    "build>=1.2",
+    "twine>=6",
+]
+
+[project.urls]
+# Fill these in before the first upload; PyPI shows them on the project page.
+# Repository = "https://github.com/<owner>/xg"
+# Issues = "https://github.com/<owner>/xg/issues"
 
 [project.scripts]
 xg = "xg_project.__main__:main"
@@ -37,6 +83,19 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xg_project"]
+
+[tool.hatch.build.targets.sdist]
+# What a source distribution carries: the package, the tests that prove it, and
+# the files a reader of it needs. `.venv`, the caches and `dist/` are excluded by
+# `.gitignore`, which hatchling honours.
+include = [
+    "/src/xg_project",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/.xgignore",
+    "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 # `pythonpath` keeps the src layout importable without an editable install.
