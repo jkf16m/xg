@@ -115,8 +115,12 @@ The user asked: `query`
 The state above is a JSON object with two keys. `query` is the user's request.
 `files` is an array of file contents, and this question names one entry of it.
 
-Answer with the probability that `files[{index}]` — the file at {path} — is one
-of the files the user's request is about.
+This question is about `files[{index}]`, the file at:
+
+{path}
+
+Answer with the probability that it is one of the files the user's request is
+about.
 
 Judge only that one file, and judge it for belonging to the set the request is
 about rather than for being the most important member of it. Every file that
