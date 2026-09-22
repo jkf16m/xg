@@ -38,11 +38,12 @@ reads the project and then either answers a question about it or edits a file:
     the next node's job, over exactly this set.
 
 ``_XG_SORT``
-    Ranks what FILTER kept. It asks Jev a second, different question — how
-    central each file is to fulfilling the goal — and introduces the same files
-    ordered most important first. Only the order is decided here; nothing is
-    dropped, because the files may be needed for an answer as well as an edit.
-    SORT is where the project workflow branches, and Jev chooses the leaf.
+    Ranks what FILTER kept. It asks Jev nothing: FILTER's question already
+    returned a probability per file, and a probability per file is a ranking, so
+    SORT is the step that spends it — the same files, ordered best first. Only
+    the order is decided here; nothing is dropped, because the files may be
+    needed for an answer as well as an edit. SORT is where the project workflow
+    branches, and Jev chooses the leaf.
 
 ``_XG_EDIT``
     A generative leaf. It takes the file SORT ranked first and asks the executor
@@ -93,8 +94,6 @@ from xg_project.graph._registry import (
     xg,
 )
 from xg_project.jev import (
-    IMPORTANCE_CRITERIA,
-    IMPORTANCE_INSTRUCTIONS,
     MODULE_CRITERIA,
     MODULE_INSTRUCTIONS,
 )
@@ -319,41 +318,38 @@ async def _filter(inp: NodeInput) -> dict[str, object]:
     }
 
 
-async def _sort(inp: NodeInput) -> dict[str, object]:
-    """Ask Jev how central each filtered file is, and introduce them ranked.
+def _sort(inp: NodeInput) -> dict[str, object]:
+    """Order the filtered files by the probability FILTER already paid for.
 
-    This is a second question, not a repeat of FILTER's: FILTER asked whether a
-    file belongs at all, SORT asks which of the survivors matters most. The
-    scores order the map; every file is kept, only the order changes, so EDIT can
-    be asked for any of them.
+    This node used to put a second question to Jev about the same files, and the
+    second question was the weaker half of the pair: FILTER had already returned
+    a probability for every file, and a probability per file is a ranking. TypeSafe
+    says so in its re-ranking cookbook — *"that noul is the score the application
+    sorts on"* — so asking again was paying twice for one judgement that had
+    already been made.
+
+    Ordering only, and only here. Every file stays in the map, because the files
+    may be needed for an answer as well as an edit, and taking the first is how
+    EDIT chooses. Nothing is dropped for ranking low.
     """
-    files = _files(inp.state.get(FILTER))
+    value = inp.state.get(FILTER)
+    files = _files(value)
     if not files:
         return {"files": {}, "scores": {}, "problem": "there are no filtered files to rank"}
-    if inp.jev is None:
-        return {
-            "files": files,
-            "scores": {},
-            "problem": "no Jev is attached, so the files cannot be ranked",
-        }
 
-    prompt = _goal(inp)
-    selection = await inp.jev.select(
-        files=files,
-        prompt=prompt,
-        instructions=IMPORTANCE_INSTRUCTIONS,
-        criteria=IMPORTANCE_CRITERIA,
-    )
+    scores: dict[str, float] = {}
+    if isinstance(value, Mapping) and isinstance(value.get("scores"), Mapping):
+        for path, score in value["scores"].items():
+            if isinstance(score, (int, float)):
+                scores[str(path)] = float(score)
+
     ranked = {
-        path: files[path]
-        for path in sorted(files, key=lambda name: selection.scores.get(name, 0.0), reverse=True)
+        path: content
+        for path, content in sorted(
+            files.items(), key=lambda item: scores.get(item[0], 0.0), reverse=True
+        )
     }
-    return {
-        "files": ranked,
-        "scores": dict(selection.scores),
-        "dropped": list(selection.dropped),
-        "problem": selection.problem or "",
-    }
+    return {"files": ranked, "scores": scores, "problem": ""}
 
 
 async def _edit(inp: NodeInput) -> EditProposal:
@@ -496,8 +492,9 @@ def default_graph() -> Registry:
             level=3,
             kind=NodeKind.DECISION,
             summary=(
-                "Orders the files that were kept by how central each one is to "
-                "the request, most important first."
+                "Orders the files that were kept by the probability FILTER gave "
+                "each one, most likely first. Nothing is dropped for ranking "
+                "low."
             ),
             children=(EDIT, ANSWER),
             handle=_sort,

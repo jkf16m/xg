@@ -382,7 +382,7 @@ class XGApp(App[None]):
                 parts.append(f"top: {escape(str(next(iter(files))))}")
         dropped = value.get("dropped")
         if isinstance(dropped, (list, tuple)) and dropped:
-            parts.append(f"[yellow]{len(dropped)} did not fit[/yellow]")
+            parts.append(f"[yellow]{len(dropped)} went unanswered[/yellow]")
         problem = value.get("problem")
         if problem:
             parts.append(f"[yellow]{escape(str(problem))}[/yellow]")

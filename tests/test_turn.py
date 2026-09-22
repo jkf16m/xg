@@ -25,7 +25,6 @@ from xg_project.graph import (
     default_graph,
 )
 from xg_project.jev import (
-    IMPORTANCE_CRITERIA,
     SELECT_CRITERIA,
     SELECT_INSTRUCTIONS,
     Routing,
@@ -302,9 +301,11 @@ async def test_filter_without_jev_reports_a_problem(session: Session, tree: Path
 
 async def test_sort_ranks_every_filtered_file_most_relevant_first(session: Session) -> None:
     session.move(SORT)
-    session.record(FILTER, {"files": {"a.py": "x", "b.py": "y"}})
-    jev = FakeJev(scores={"a.py": 0.2, "b.py": 0.9})
-    await take_turn(session, "go", jev=jev)
+    session.record(
+        FILTER,
+        {"files": {"a.py": "x", "b.py": "y"}, "scores": {"a.py": 0.2, "b.py": 0.9}},
+    )
+    await take_turn(session, "go")
 
     assert list(session.state[SORT]["files"]) == ["b.py", "a.py"]
     assert session.state[SORT]["scores"] == {"a.py": 0.2, "b.py": 0.9}
@@ -338,32 +339,48 @@ async def test_sort_can_route_to_the_answer_leaf(session: Session) -> None:
     assert turn.moved is not None and turn.moved.to == ANSWER
 
 
-async def test_sort_asks_jev_a_different_question_than_filter(session: Session, tree: Path) -> None:
-    """Filter asks whether a file belongs; sort asks which of the survivors matters."""
+async def test_sort_orders_the_files_by_the_scores_filter_returned(
+    session: Session, tree: Path
+) -> None:
+    """SORT spends FILTER's probabilities instead of asking a question of its own."""
     session.move(FILTER)
-    jev = FakeJev(kept={"a.py", "b.py"})
+    jev = FakeJev(kept={"a.py", "b.py"}, scores={"a.py": 0.2, "b.py": 0.9})
     await take_turn(session, "go", jev=jev, root=tree)
     await take_turn(session, "go", jev=jev)
 
-    relevance, importance = jev.select_calls
-    assert importance["criteria"] is IMPORTANCE_CRITERIA
-    assert importance["instructions"] != relevance["instructions"]
-    assert set(importance["files"]) == {"a.py", "b.py"}
+    assert len(jev.select_calls) == 1, "sort must not re-ask a question filter answered"
+    assert list(session.state[SORT]["files"]) == ["b.py", "a.py"]
+    assert session.state[SORT]["scores"] == {"a.py": 0.2, "b.py": 0.9}
 
 
-async def test_sort_only_ranks_what_filter_kept(session: Session, tree: Path) -> None:
+async def test_sort_keeps_every_file_it_ranks(session: Session, tree: Path) -> None:
+    """Ordering only: a low score moves a file, it never removes one."""
     session.move(FILTER)
-    jev = FakeJev(kept={"b.py"})
+    jev = FakeJev(kept={"a.py", "b.py"}, scores={"a.py": 0.5, "b.py": 0.9})
     await take_turn(session, "go", jev=jev, root=tree)
     await take_turn(session, "go", jev=jev)
-    assert set(jev.select_calls[1]["files"]) == {"b.py"}
+
+    assert set(session.state[SORT]["files"]) == {"a.py", "b.py"}
 
 
-async def test_sort_without_jev_reports_a_problem(session: Session) -> None:
+async def test_sort_works_without_jev_at_all(session: Session, tree: Path) -> None:
+    """It is arithmetic on the state, so it needs no client to be available."""
+    session.move(FILTER)
+    jev = FakeJev(kept={"a.py", "b.py"}, scores={"a.py": 0.2, "b.py": 0.9})
+    await take_turn(session, "go", jev=jev, root=tree)
+    await take_turn(session, "go", jev=None)
+
+    assert list(session.state[SORT]["files"]) == ["b.py", "a.py"]
+
+
+async def test_sort_with_no_scores_keeps_the_order_it_was_given(session: Session) -> None:
+    """Nothing to sort by is not an error: the files keep the order they arrived in."""
     session.move(SORT)
-    session.record(FILTER, {"files": {"a.py": "x"}})
+    session.record(FILTER, {"files": {"a.py": "x", "b.py": "y"}})
     await take_turn(session, "go")
-    assert "no Jev" in session.state[SORT]["problem"]
+
+    assert list(session.state[SORT]["files"]) == ["a.py", "b.py"]
+    assert session.state[SORT]["problem"] == ""
 
 
 # -- the gated leaves ------------------------------------------------------

@@ -110,67 +110,55 @@ choose the option that is the least wrong and answer with low confidence.
 
 
 SELECT_INSTRUCTIONS = """\
-The user asked: {request}
+The user asked: `query`
 
-The state above is a JSON object whose keys are file paths and whose values are
-the full contents of those files. Answer with the probability that the file at
-`{path}` is one of the files the user's request is about.
+The state above is a JSON object with two keys. `query` is the user's request.
+`files` is an array of file contents, and this question names one entry of it.
+
+Answer with the probability that `files[{index}]` — the file at {path} — is one
+of the files the user's request is about.
 
 Judge only that one file, and judge it for belonging to the set the request is
-about rather than for being the most important member of that set. Every file
-that would contribute to fulfilling the request belongs to it, whether the
-request would change it, quote it, or only be understood through it. A file is
-unrelated only when it has nothing to do with the request at all; being
-secondary to another file that also belongs, or mattering less than it, is not a
-reason to leave it out.
+about rather than for being the most important member of it. Every file that
+would contribute to fulfilling the request belongs: the request may change it,
+quote it, or only be understood through it. A file is unrelated only when it has
+nothing to do with the request at all; being secondary to another file that also
+belongs, or mattering less than it, is not a reason to call it unrelated.
 
-This question gathers and does not rank. A later question ranks what is gathered
-here, so admitting a file that belongs but is not central costs only context,
-while leaving out a file that belongs loses it for the rest of the run.
+The probabilities returned here are also the order the files are used in, so
+spend the range and let them separate. Do not return the same value for several
+files because all of them belong.
 """
 
 SELECT_CRITERIA = NoulCriteria(
-    true="the file is one of the files the request is about",
-    false="the file has nothing to do with the request",
+    true="`files[{index}]` is one of the files the request is about",
+    false="`files[{index}]` has nothing to do with the request",
 )
 """The two ends of the question FILTER asks, in terms of belonging rather than
-of usefulness.
+of usefulness, and pointed at the file by its key in the state.
+
+Backticked references are a documented TypeSafe feature, not a prompt trick: a
+question that names the slice of the state it is about removes a hop of
+inference, and makes a wrong answer debuggable — you can see which entry the
+question claimed to be about. Naming the entry in the criteria as well as the
+instructions is the same move twice, since the criteria are what define the two
+ends of the probability.
 
 A file is dropped only by falling below the threshold, so the shape of the false
 end is what decides whether a secondary-but-related file survives: "would not
 help fulfil the request" puts every supporting file near a no, while "has
-nothing to do with the request" puts them near a yes. FILTER gathers the set the
-request is about; SORT ranks it. Asking FILTER to rank as well makes it drop the
-supporting files that a request to explain or change something is usually made
-of.
+nothing to do with the request" puts them near a yes.
 """
-
-IMPORTANCE_INSTRUCTIONS = """\
-The user asked: {request}
-
-The state above is a JSON object whose keys are file paths and whose values are
-the full contents of those files. Answer with the probability that the file at
-`{path}` is one of the files that must be read to fulfil the request, judged
-against the others.
-
-Judge only that one file. A file the request cannot be fulfilled without scores
-near one; a file that merely lives in the same project, or only mentions a
-related name, scores near zero. This is a ranking, so reserve high probabilities
-for the few files that carry the request.
-"""
-
-IMPORTANCE_CRITERIA = NoulCriteria(
-    true="the file is central to fulfilling the request",
-    false="the file is peripheral or irrelevant to the request",
-)
 
 MODULE_INSTRUCTIONS = """\
-The user asked: {request}
+The user asked: `query`
 
-The state above is a JSON object whose keys are context module paths and whose
-values are the modules' own declarations of what they expose and import. Answer
-with the probability that the module at `{path}` owns the context this request
-should be answered from.
+The state above is a JSON object with two keys. `query` is the user's request.
+`files` is an array, and each entry is one context module's own declaration of
+what it exposes and imports. This question names one entry of it.
+
+Answer with the probability that `files[{index}]` — the module at {path} — owns
+the context this request should be answered from.
 
 Judge only that one module, and judge it on its own declaration. A module whose
 description says it is about what the request is about scores high. A module
@@ -180,8 +168,8 @@ choice hides the right files entirely.
 """
 
 MODULE_CRITERIA = NoulCriteria(
-    true="the request should be answered from this module's context",
-    false="the request belongs to a different module's context",
+    true="`files[{index}]` is the module the request should be answered from",
+    false="`files[{index}]` is a different module's context",
 )
 
 RELEVANCE_THRESHOLD = 0.5
@@ -196,21 +184,35 @@ raised for the context cost and turned out above what the model ever produced,
 so nothing was ever selected.
 """
 
-RESIZE_STATUSES = frozenset({400, 413})
-"""HTTP statuses meaning the request itself was refused, so fewer files may fit.
+BATCH_CHARS = 100_000
+"""How much file content one request may carry before the next batch starts.
 
-400 is the API's bad-request answer and 413 is payload-too-large; both are worth
-asking again with a smaller state rather than reporting. Anything else — a 429, a
-5xx, a connection error — is not about the size of the request, and is either
-retried by the SDK or reported as the problem it is.
+TypeSafe documents two budgets that apply at the same time: 64k tokens for the
+whole request, state plus every question combined, and 32k for the state plus the
+single longest question. A file tree respects neither, so the reader cannot send
+one request per run and hope that it fits.
+
+It sends as many files as fit, then sends the next batch as its own request, and
+merges the scores. Every file is put to the model, in some batch — which is the
+point. The previous rule dropped the largest files until the payload shrank, so
+on this project the six biggest files, 60% of the tree by volume and the six most
+likely to hold the answer, were never asked about at all and were then recorded
+as having scored zero.
+
+Chars rather than tokens because the split has to be decided before the request
+is built. The number comes from this project's own tree: 254,695 characters over
+23 files was refused, and 101,191 characters over 17 files was accepted, so
+100,000 sits inside the measured gap and below the documented 32k-token ceiling.
 """
 
-SHRINK_RATIO = 0.8
-"""What fraction of a refused payload to keep before asking again.
+TOO_BIG_STATUSES = frozenset({400, 413})
+"""HTTP statuses meaning the payload did not fit, so the batch is split again.
 
-Dropping one file at a time would re-ask once per file on a very large tree.
-Cutting to four fifths converges in a handful of attempts while removing as few
-files as possible, because the largest are dropped first.
+400 is the API's bad-request answer — the one it gives for a state past the token
+budget — and 413 is payload-too-large. Both are answered by halving the batch and
+asking again, which is convergence that cannot throw a file away. Anything else —
+a 429, a 5xx, a connection error — is not about the size of the request, and is
+either retried by the SDK or reported as the problem it is.
 """
 
 
@@ -229,12 +231,18 @@ difference is what a threshold is chosen against.
     model: str | None = None
     threshold: float = RELEVANCE_THRESHOLD
     dropped: tuple[str, ...] = ()
-    """Files left out because even the shrunk request would not fit.
+    """Files the model did not answer for, or that were too large to send alone.
 
     They keep their zero score and so are not kept: nothing judged them, and
     passing them on would put content into the context that nothing vouched for.
-    They are named rather than merely counted so the state can show what was
-    left unread.
+    They are named rather than merely counted so the state can show what was left
+    unread.
+
+    Batching means this should be empty. Every file goes to the model in some
+    batch, and a batch refused for its size is split rather than abandoned. It
+    stays as a report because the alternative — scoring a file that was never
+    asked about as zero — is indistinguishable from the model having rejected it,
+    and that ambiguity is what the batching replaced.
     """
     requests: int = 0
     """How many requests the selection took, including any refused for size."""
@@ -251,38 +259,50 @@ difference is what a threshold is chosen against.
             return self.problem
         line = f"kept {len(self.files)} of {len(self.scores)} files above {self.threshold:.2f}"
         if self.dropped:
-            line += f" ({len(self.dropped)} did not fit)"
+            line += f" ({len(self.dropped)} went unanswered)"
         return line
 
 
-def build_state_from(files: Mapping[str, str]) -> dict[str, str]:
-    """The state parameter for a relevance question: path -> content.
+def build_state_from(files: Sequence[tuple[str, str]], *, query: str) -> dict[str, object]:
+    """The state for a selection question: the request, and an array of file contents.
 
-    A named function rather than a ``dict(files)`` inline, because this is the
-    one place the wire shape of the selection state is written down. The keys
-    are the question names as well, which is what lets one request carry one
-    question per file.
+    Two named keys rather than one top-level key per file. The old shape used the
+    file paths themselves as the state's keys, which made the backticked
+    reference a question is meant to use ambiguous: a path carries dots and
+    slashes, and a dot is a step in a path expression. Here the request is
+    ``query``, the contents are the array ``files``, and a question points at
+    exactly one entry of it by index.
+
+    This is the shape TypeSafe's own passage-classification cookbook uses —
+    ``{"query": …, "passages": […]}}`` with ``Does `passages[i]` help answer
+    `query`?`` — and it is the closest documented analogue to selecting files.
     """
-    return dict(files)
+    return {"query": query, "files": [content for _, content in files]}
 
 
-def _shrink(items: Sequence[tuple[str, str]]) -> tuple[list[tuple[str, str]], list[str]]:
-    """Drop the largest files until the payload is a fifth smaller.
+def _batches(
+    items: Sequence[tuple[str, str]], *, budget: int = BATCH_CHARS
+) -> list[list[tuple[str, str]]]:
+    """Split the files into as few batches as the request budget allows.
 
-    Largest first because a byte of budget freed is a byte freed: removing one
-    big file keeps more of the small ones than removing them one by one. The last
-    file is never dropped, since a request with no state has nothing to answer.
+    A batch is filled in the order given and closed when the next file would take
+    it past the budget. A single file larger than the whole budget still gets a
+    batch of its own rather than being dropped: it is as likely as any file to be
+    the answer, and one refusal to report beats a silent absence.
     """
-    remaining = list(items)
-    total = sum(len(path) + len(content) for path, content in remaining)
-    target = total * SHRINK_RATIO
-    dropped: list[str] = []
-    while len(remaining) > 1 and total > target:
-        biggest = max(remaining, key=lambda item: len(item[0]) + len(item[1]))
-        remaining.remove(biggest)
-        dropped.append(biggest[0])
-        total -= len(biggest[0]) + len(biggest[1])
-    return remaining, dropped
+    batches: list[list[tuple[str, str]]] = []
+    batch: list[tuple[str, str]] = []
+    size = 0
+    for path, content in items:
+        weight = len(path) + len(content)
+        if batch and size + weight > budget:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append((path, content))
+        size += weight
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 @dataclass(frozen=True)
@@ -439,18 +459,20 @@ class Jev:
         files left out are reported in ``dropped`` rather than scored as if they
         had been judged and found wanting.
 
-        ``instructions`` is a template with two placeholders, ``{request}`` and
-        ``{path}``, and it is formatted once per file. The path is not optional:
-        a question's *id* is not sent to the model, so a request of questions that
-        differ only in their keys is a request the model cannot make sense of.
-        Naming the file in its own instructions is what makes one question per
-        file mean anything. A caller wanting a different judgement — FILTER keeps
-        what is relevant, SORT ranks what matters most — supplies its own
-        instructions and criteria, and shares this request handling.
+        ``instructions`` and ``criteria`` are templates with two placeholders,
+        ``{index}`` and ``{path}``, formatted once per file. Both matter: a
+        question's *id* is not sent to the model, so a request whose questions
+        differ only in their keys is a request the model cannot make sense of,
+        and a backticked reference into the state is what tells it which entry to
+        judge. Naming the file in the instructions and again in the criteria is
+        the same move at both ends of the probability.
 
-        A file Jev did not answer for scores zero and is dropped. That is the safe
-        direction: its relevance is unknown, and passing it on would put content
-        into the context that nothing vouched for.
+        The files go out in batches that fit the request budget — every one of
+        them, with the scores merged afterwards. A batch refused for being too
+        large is halved and asked again, so nothing is discarded for its size. A
+        file the model did not answer for is named in ``dropped`` and scores
+        zero; with batching that should not happen, which is why it is reported
+        rather than passed over.
         """
         if not files:
             return Selection(problem="there are no files to consider", threshold=threshold)
@@ -463,48 +485,55 @@ class Jev:
         except TypeSafeError as error:
             return Selection(problem=f"Jev is not configured: {error}", threshold=threshold)
 
-        scores: dict[str, float] = {path: 0.0 for path in files}
-        remaining = list(files.items())
-        dropped: list[str] = []
+        scores: dict[str, float] = {}
+        unanswered: list[str] = []
         model: str | None = None
         requests = 0
+        problems: list[str] = []
+        pending = _batches(list(files.items()))
 
-        while True:
+        while pending:
+            batch = pending.pop(0)
             requests += 1
             questions = {
                 path: Noul(
-                    instructions=question_instructions.format(request=prompt, path=path),
-                    criteria=question_criteria,
+                    instructions=question_instructions.format(index=index, path=path),
+                    criteria=NoulCriteria(
+                        true=question_criteria["true"].format(index=index),
+                        false=question_criteria["false"].format(index=index),
+                    ),
                 )
-                for path, _ in remaining
+                for index, (path, _) in enumerate(batch)
             }
             try:
                 response = await client.system_one(
-                    state=build_state_from(dict(remaining)),
+                    state=build_state_from(batch, query=prompt),
                     questions=questions,
                 )
             except TypeSafeAPIConnectionError as error:
                 return Selection(problem=f"could not reach Jev: {error}", threshold=threshold)
             except TypeSafeAPIError as error:
-                if error.status not in RESIZE_STATUSES:
+                if error.status not in TOO_BIG_STATUSES:
                     return Selection(
                         problem=f"Jev rejected the request: {error}", threshold=threshold
                     )
-                remaining, just_dropped = _shrink(remaining)
-                if not just_dropped:
-                    return Selection(
-                        problem=f"Jev refused even one file: {error}", threshold=threshold
-                    )
-                dropped.extend(just_dropped)
+                if len(batch) == 1:
+                    unanswered.append(batch[0][0])
+                    problems.append(f"{batch[0][0]} was too large to send")
+                    continue
+                middle = len(batch) // 2
+                pending[:0] = [batch[:middle], batch[middle:]]
                 continue
             except TypeSafeError as error:
                 return Selection(problem=f"Jev is not configured: {error}", threshold=threshold)
 
             model = response.model
-            for path, _ in remaining:
+            for path, _ in batch:
                 answer = response.nouls.get(path)
-                scores[path] = answer.noul if answer is not None else 0.0
-            break
+                if answer is None:
+                    unanswered.append(path)
+                else:
+                    scores[path] = answer.noul
 
         kept = {
             path: content
@@ -513,11 +542,12 @@ class Jev:
         }
         return Selection(
             files=kept,
-            scores=scores,
+            scores={path: scores.get(path, 0.0) for path in files},
             model=model,
             threshold=threshold,
-            dropped=tuple(dropped),
+            dropped=tuple(unanswered),
             requests=requests,
+            problem="; ".join(problems) or None,
         )
 
     async def aclose(self) -> None:

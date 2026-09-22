@@ -22,7 +22,6 @@ from typesafe_sdk import (
 )
 
 from xg_project.jev import (
-    IMPORTANCE_INSTRUCTIONS,
     NEXT_NODE,
     SELECT_CRITERIA,
     SELECT_INSTRUCTIONS,
@@ -360,28 +359,34 @@ def test_a_hanging_pass_is_no_key(monkeypatch) -> None:
 # -- selecting the files worth reading -------------------------------------
 
 
-def test_the_relevance_question_gathers_and_does_not_rank() -> None:
-    """FILTER admits the set; SORT is the question that orders it.
+def test_the_relevance_question_gathers_rather_than_nominating() -> None:
+    """FILTER admits the set; the probability it returns is what orders it.
 
     A wording guard, because the failure it prevents is quiet: an instruction
     asking for the *most* important files makes FILTER drop the supporting ones,
     and a request to explain or change a piece of behaviour then arrives with
     only the file that names it and none of the files that carry it.
     """
-    assert "gathers" in SELECT_INSTRUCTIONS
-    assert "does not rank" in SELECT_INSTRUCTIONS
     assert "secondary" in SELECT_INSTRUCTIONS
+    assert "let them separate" in SELECT_INSTRUCTIONS
+
+
+def test_the_relevance_question_points_at_the_file_in_the_state() -> None:
+    """A backticked key, in the instructions and again in the criteria.
+
+    The reference is what removes a hop of inference, and it is a documented
+    TypeSafe feature rather than a prompt trick. The criteria carry it too,
+    because the criteria are what define the two ends of the probability.
+    """
+    assert "`files[{index}]`" in SELECT_INSTRUCTIONS
+    assert "`query`" in SELECT_INSTRUCTIONS
+    assert "`files[{index}]`" in SELECT_CRITERIA["true"]
+    assert "`files[{index}]`" in SELECT_CRITERIA["false"]
 
 
 def test_the_relevance_question_drops_only_unrelated_files() -> None:
     """The false end decides it, since a file is dropped by scoring below it."""
     assert "nothing to do with the request" in SELECT_CRITERIA["false"]
-
-
-def test_the_two_file_questions_are_asked_in_opposite_directions() -> None:
-    """Gathering then ranking, and the ranking is the one that reserves scores."""
-    assert "reserve high probabilities" in IMPORTANCE_INSTRUCTIONS
-    assert "reserve high probabilities" not in SELECT_INSTRUCTIONS
 
 
 FILES = {"src/parse.py": "def parse(): ...", "docs/readme.md": "# readme"}
@@ -412,11 +417,33 @@ async def test_one_noul_question_is_asked_per_file_named_by_its_path() -> None:
     assert all(isinstance(question, Noul) for question in questions.values())
 
 
-async def test_the_selection_state_is_the_file_map_itself() -> None:
-    """Path -> direct content, so the question name is the key into the state."""
+async def test_the_selection_state_is_the_query_and_an_array_of_files() -> None:
+    """Two named keys, not one top-level key per file.
+
+    The old shape used the file paths as the state's own keys, which made the
+    backticked reference a question must use ambiguous: a path carries dots and
+    slashes, and a dot is a step in a path expression. Two keys with the contents
+    in an array is the shape TypeSafe's own passage-classification cookbook uses.
+    """
     client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.2}))
     await select_files(client)
-    assert client.calls[0]["state"] == FILES
+    assert client.calls[0]["state"] == {
+        "query": "where is the parser?",
+        "files": [FILES["src/parse.py"], FILES["docs/readme.md"]],
+    }
+
+
+async def test_each_question_points_at_its_own_entry_by_index() -> None:
+    """The index in the question is the position in the state's array."""
+    client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.2}))
+    await select_files(client)
+
+    state = client.calls[0]["state"]
+    questions = client.calls[0]["questions"]
+    for index, path in enumerate(FILES):
+        question = questions[path]
+        assert f"`files[{index}]`" in question.instructions
+        assert state["files"][index] == FILES[path]
 
 
 async def test_each_question_names_its_own_file() -> None:
@@ -432,15 +459,16 @@ async def test_each_question_names_its_own_file() -> None:
 
 
 async def test_a_callers_question_replaces_the_default_relevance_one() -> None:
-    """Filter asks whether a file belongs; sort asks which survivor matters most."""
-    from xg_project.jev import IMPORTANCE_CRITERIA
+    """A caller supplies its own judgement, and shares the request handling."""
+    from typesafe_sdk import NoulCriteria
 
+    criteria = NoulCriteria(true="`files[{index}]` is it", false="`files[{index}]` is not")
     client = FakeClient(result=noul_response({"src/parse.py": 0.9, "docs/readme.md": 0.2}))
-    await select_files(client, instructions="rank this", criteria=IMPORTANCE_CRITERIA)
+    await select_files(client, instructions="rank `files[{index}]`", criteria=criteria)
 
     question = client.calls[0]["questions"]["src/parse.py"]
-    assert question.instructions == "rank this"
-    assert question.criteria == IMPORTANCE_CRITERIA
+    assert question.instructions == "rank `files[0]`"
+    assert question.criteria == {"true": "`files[0]` is it", "false": "`files[0]` is not"}
 
 
 async def test_files_above_the_threshold_are_kept_and_the_rest_dropped() -> None:
@@ -534,39 +562,65 @@ class EchoClient:
 BIG = {f"f{index}.py": "x" * 500 for index in range(10)}
 
 
-async def test_every_file_goes_into_one_request() -> None:
+async def test_every_file_goes_into_one_request_when_it_fits() -> None:
     """One request, so the model judges the files against each other."""
     client = EchoClient()
     selection = await Jev(client=client).select(files=BIG, prompt="q")
     assert len(client.calls) == 1
-    assert set(client.calls[0]["state"]) == set(BIG)
+    assert client.calls[0]["state"] == {"query": "q", "files": list(BIG.values())}
     assert set(selection.files) == set(BIG)
     assert set(selection.scores) == set(BIG)
     assert selection.requests == 1
 
 
-async def test_a_refused_request_drops_the_largest_files_and_asks_again() -> None:
-    client = EchoClient(fail_on=1)
-    selection = await Jev(client=client).select(files=BIG, prompt="q")
-    assert len(client.calls) == 2
-    assert selection.requests == 2
-    assert selection.dropped
-    remaining = set(BIG) - set(selection.dropped)
-    assert set(client.calls[1]["state"]) == remaining
-    assert set(selection.files) == remaining
+async def test_the_budget_splits_the_files_into_batches() -> None:
+    """Too big for one request is a second request, not a shorter file list."""
+    from xg_project.jev import _batches
+
+    items = [(f"f{index}.py", "x" * 500) for index in range(10)]
+    batches = _batches(items, budget=1_600)
+    assert [len(batch) for batch in batches] == [3, 3, 3, 1]
+    assert [path for batch in batches for path, _ in batch] == [path for path, _ in items]
 
 
-async def test_the_files_that_did_not_fit_are_reported_not_silently_scored() -> None:
+async def test_a_file_too_large_for_any_budget_still_gets_its_own_request() -> None:
+    """It is as likely as any file to be the answer, so it is never dropped."""
+    from xg_project.jev import _batches
+
+    batches = _batches([("huge.py", "x" * 10_000), ("tiny.py", "x")], budget=100)
+    assert [len(batch) for batch in batches] == [1, 1]
+    assert batches[0][0][0] == "huge.py"
+
+
+async def test_a_refused_batch_is_split_and_asked_again() -> None:
+    """A refusal costs requests. It must not cost files."""
     client = EchoClient(fail_on=1)
     selection = await Jev(client=client).select(files=BIG, prompt="q")
-    for path in selection.dropped:
-        assert selection.scores[path] == 0.0
-        assert path not in selection.files
-    assert "did not fit" in selection.explain()
+
+    assert selection.ok
+    assert selection.dropped == ()
+    assert set(selection.scores) == set(BIG)
+    assert all(selection.scores[path] == 0.9 for path in BIG)
+    assert selection.requests == 3
+    assert len(client.calls) == 3
+
+
+async def test_the_largest_files_are_not_the_ones_given_up_on() -> None:
+    """The old rule dropped the biggest files first, which is where the answer is.
+
+    On this project that removed the six largest files — 60% of the tree by
+    volume — before any question was asked about them.
+    """
+    client = EchoClient(fail_on=1)
+    files = {"big.py": "x" * 4_000, "mid.py": "x" * 500, "small.py": "x" * 10}
+    selection = await Jev(client=client).select(files=files, prompt="q")
+
+    assert selection.dropped == ()
+    assert set(selection.scores) == set(files)
 
 
 async def test_a_rejection_that_is_not_about_size_is_reported_without_retrying() -> None:
-    """A rate limit is not a payload problem, so shrinking would be pointless."""
+    """A rate limit is not a payload problem, so splitting would be pointless."""
     client = EchoClient(fail_on=1, fail_status=429)
     selection = await Jev(client=client).select(files=BIG, prompt="q")
     assert not selection.ok
@@ -574,11 +628,21 @@ async def test_a_rejection_that_is_not_about_size_is_reported_without_retrying()
     assert "Jev rejected the request" in (selection.problem or "")
 
 
-async def test_a_file_that_is_refused_even_alone_is_a_problem() -> None:
+async def test_a_file_that_is_refused_even_alone_is_reported_not_scored_zero() -> None:
+    """Never asked is not the same as rejected, and must not look like it."""
     client = EchoClient(always_fail=True)
     selection = await Jev(client=client).select(files={"only.py": "x"}, prompt="q")
-    assert not selection.ok
-    assert "refused even one file" in (selection.problem or "")
+    assert selection.dropped == ("only.py",)
+    assert "too large to send" in (selection.problem or "")
+
+
+def test_explain_counts_the_files_that_went_unanswered() -> None:
+    """The dropped files are named in the report, not folded into the score."""
+    from xg_project.jev import Selection
+
+    selection = Selection(files={"a": ""}, scores={"a": 0.9, "b": 0.0}, dropped=("b",))
+    assert "kept 1 of 2" in selection.explain()
+    assert "1 went unanswered" in selection.explain()
 
 
 async def test_a_single_request_is_the_common_case() -> None:
