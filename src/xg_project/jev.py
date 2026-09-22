@@ -113,18 +113,37 @@ SELECT_INSTRUCTIONS = """\
 The user asked: {request}
 
 The state above is a JSON object whose keys are file paths and whose values are
-the full contents of those files. Answer with the probability that reading the
-file at `{path}` would help fulfil the user's request.
+the full contents of those files. Answer with the probability that the file at
+`{path}` is one of the files the user's request is about.
 
-Judge only that one file. A file that would inform the request scores high; a
-file only tangentially related, or which merely lives in the same project,
-scores low.
+Judge only that one file, and judge it for belonging to the set the request is
+about rather than for being the most important member of that set. Every file
+that would contribute to fulfilling the request belongs to it, whether the
+request would change it, quote it, or only be understood through it. A file is
+unrelated only when it has nothing to do with the request at all; being
+secondary to another file that also belongs, or mattering less than it, is not a
+reason to leave it out.
+
+This question gathers and does not rank. A later question ranks what is gathered
+here, so admitting a file that belongs but is not central costs only context,
+while leaving out a file that belongs loses it for the rest of the run.
 """
 
 SELECT_CRITERIA = NoulCriteria(
-    true="reading the file would help fulfil the request",
-    false="reading the file would not help fulfil the request",
+    true="the file is one of the files the request is about",
+    false="the file has nothing to do with the request",
 )
+"""The two ends of the question FILTER asks, in terms of belonging rather than
+of usefulness.
+
+A file is dropped only by falling below the threshold, so the shape of the false
+end is what decides whether a secondary-but-related file survives: "would not
+help fulfil the request" puts every supporting file near a no, while "has
+nothing to do with the request" puts them near a yes. FILTER gathers the set the
+request is about; SORT ranks it. Asking FILTER to rank as well makes it drop the
+supporting files that a request to explain or change something is usually made
+of.
+"""
 
 IMPORTANCE_INSTRUCTIONS = """\
 The user asked: {request}

@@ -26,10 +26,16 @@ reads the project and then either answers a question about it or edits a file:
 ``_XG_FILTER``
     Reads the files in scope — what the selected module exposes, or the whole tree
     when no module was selected, minus whatever ``.gitignore`` and ``.xgignore``
-    exclude — and then asks Jev, once per file, whether that file is relevant to
-    the goal. It introduces the files above the relevance threshold as the
+    exclude — and then asks Jev, once per file, whether that file is one of the
+    files the goal is about. It introduces the files above the threshold as the
     candidates, so what survives is a decision Jev made rather than a directory
     listing.
+
+    This is the gathering step, and it is deliberately not the ranking one. The
+    question is about belonging, not importance, so a file that supports the goal
+    without being central to it is kept — a request to explain something is
+    answered out of the supporting files as much as the defining one. Ranking is
+    the next node's job, over exactly this set.
 
 ``_XG_SORT``
     Ranks what FILTER kept. It asks Jev a second, different question — how
@@ -249,7 +255,7 @@ async def _add(inp: NodeInput) -> AddProposal:
 
 
 async def _filter(inp: NodeInput) -> dict[str, object]:
-    """Ignore deterministically, then ask Jev which surviving files are relevant.
+    """Ignore deterministically, then ask Jev which surviving files the request is about.
 
     Two stages, in this order, and the order is the point. `read_tree` is the
     deterministic stage: it walks the root honouring ``.gitignore`` and
@@ -259,6 +265,13 @@ async def _filter(inp: NodeInput) -> dict[str, object]:
     above the threshold are introduced as candidates. A file Jev did not answer
     for is dropped rather than passed on with a caveat — its relevance is unknown,
     which is not the same as relevant.
+
+    This node gathers and does not rank. Its question asks whether a file belongs
+    to the set the request is about, so a file that supports the request without
+    being the centre of it is kept. Ranking is SORT's question, asked next and
+    over exactly this set: splitting them is what lets a request to explain or
+    change something arrive with all the files that explain it, and still leaves
+    one file nominated to be edited.
 
     ``read`` is how many files the deterministic stage produced, kept beside the
     kept set so the state shows both halves of the step: what was in scope, and
@@ -470,8 +483,8 @@ def default_graph() -> Registry:
             summary=(
                 "Reads the files in scope — what the chosen context module "
                 "exposes, otherwise the whole project, less anything .gitignore "
-                "or .xgignore excludes — and keeps the ones relevant to the "
-                "request."
+                "or .xgignore excludes — and gathers every file the request is "
+                "about."
             ),
             children=(SORT,),
             handle=_filter,

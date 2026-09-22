@@ -226,13 +226,18 @@ async def test_filter_reads_the_tree_and_records_the_files(session: Session, tre
     assert turn.moved is not None and turn.moved.to == SORT
 
 
-async def test_filter_asks_jev_whether_each_file_would_help(session: Session, tree: Path) -> None:
+async def test_filter_asks_jev_which_files_the_request_is_about(
+    session: Session, tree: Path
+) -> None:
     session.move(FILTER)
     jev = FakeJev(kept={"a.py"})
     await take_turn(session, "go", jev=jev, root=tree)
 
     assert set(jev.select_calls[0]["files"]) == {"a.py", "b.py"}
-    assert "help" in jev.select_calls[0]["instructions"].lower()
+    # Whitespace collapsed, because the question is hard-wrapped and a phrase
+    # assertions should not be a statement about where the wrapping fell.
+    asked = " ".join(jev.select_calls[0]["instructions"].split())
+    assert "the request is about" in asked
     assert jev.select_calls[0]["criteria"] is SELECT_CRITERIA
 
 

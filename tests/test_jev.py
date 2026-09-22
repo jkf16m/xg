@@ -18,11 +18,18 @@ from typesafe_sdk import (
     SystemOneResponse,
     TypeSafeAPIConnectionError,
     TypeSafeAPIError,
-    TypeSafeError,
     Usage,
 )
 
-from xg_project.jev import NEXT_NODE, Jev, api_key_from_pass, build_state
+from xg_project.jev import (
+    IMPORTANCE_INSTRUCTIONS,
+    NEXT_NODE,
+    SELECT_CRITERIA,
+    SELECT_INSTRUCTIONS,
+    Jev,
+    api_key_from_pass,
+    build_state,
+)
 
 OPTIONS = {"command": "run a self-contained instruction", "plan": "write a plan"}
 
@@ -351,6 +358,30 @@ def test_a_hanging_pass_is_no_key(monkeypatch) -> None:
 
 
 # -- selecting the files worth reading -------------------------------------
+
+
+def test_the_relevance_question_gathers_and_does_not_rank() -> None:
+    """FILTER admits the set; SORT is the question that orders it.
+
+    A wording guard, because the failure it prevents is quiet: an instruction
+    asking for the *most* important files makes FILTER drop the supporting ones,
+    and a request to explain or change a piece of behaviour then arrives with
+    only the file that names it and none of the files that carry it.
+    """
+    assert "gathers" in SELECT_INSTRUCTIONS
+    assert "does not rank" in SELECT_INSTRUCTIONS
+    assert "secondary" in SELECT_INSTRUCTIONS
+
+
+def test_the_relevance_question_drops_only_unrelated_files() -> None:
+    """The false end decides it, since a file is dropped by scoring below it."""
+    assert "nothing to do with the request" in SELECT_CRITERIA["false"]
+
+
+def test_the_two_file_questions_are_asked_in_opposite_directions() -> None:
+    """Gathering then ranking, and the ranking is the one that reserves scores."""
+    assert "reserve high probabilities" in IMPORTANCE_INSTRUCTIONS
+    assert "reserve high probabilities" not in SELECT_INSTRUCTIONS
 
 
 FILES = {"src/parse.py": "def parse(): ...", "docs/readme.md": "# readme"}
