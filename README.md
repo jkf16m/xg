@@ -57,9 +57,13 @@ There is no log of actions to read past. What each node produced *is* the state.
 ## Install
 
 ```sh
-pipx install xg     # or: pip install xg
+pipx install xg-project     # or: pip install xg-project
 xg
 ```
+
+The package is `xg-project`; the command it installs is `xg`. PyPI will not
+accept the bare name `xg`, so the distribution carries the suffix and the
+command does not.
 
 `xg` reads the project in the working directory:
 

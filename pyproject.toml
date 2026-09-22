@@ -1,5 +1,13 @@
 [project]
-name = "xg"
+# Not `xg`: PyPI refuses that name outright. It is on the administrators'
+# prohibited list, which is a different and harder answer than "taken" — such
+# names are hidden from the index and the JSON API, and no name-transfer request
+# can release one.
+#
+# The distribution name and the command name are separate, so nothing is lost:
+# the package is installed as `xg-project` and the command it puts on the path is
+# still `xg`. Nothing outside the packaging metadata has to know.
+name = "xg-project"
 version = "0.1.0"
 description = "A terminal agent for coding tasks that decides before it writes"
 readme = "README.md"
